@@ -564,6 +564,12 @@
         const t = tickers[s];
         return t ? { symbol: s, price: Number(t.lastPrice), changePercent: Number(t.priceChangePercent) } : null;
       }).filter(Boolean);
+      // 다른 트레이더들 성적(오늘 수익률)을 같이 보내서 경쟁심을 느끼게 한다
+      const rivals = TRADERS.filter((x) => x.id !== traderId).map((x) => ({
+        name: x.name,
+        badge: x.badge,
+        todayPct: Number(todayPct(x.id).toFixed(2)),
+      }));
       const res = await fetch(DECIDE_ENDPOINT, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -572,6 +578,8 @@
           leverage: trader.leverage,
           portfolio: portfolios[traderId],
           market,
+          myTodayPct: Number(todayPct(traderId).toFixed(2)),
+          rivals,
         }),
       });
       if (!res.ok) throw new Error('요청 실패');

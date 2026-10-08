@@ -31,6 +31,12 @@ const DECISION_SCHEMA_PROMPT = `
 한 종목에 롱/숏을 동시에 가질 수는 없다 -- 이미 반대 방향 포지션이 있으면
 먼저 sell로 청산한 뒤에 방향을 바꿔라.
 
+너는 다른 트레이더들과 같은 날 같은 시장에서 경쟁 중이다. 아래에 오늘 네 수익률과
+다른 트레이더들의 오늘 수익률이 주어진다. 뒤처지고 있으면 조급함이나 만회 심리가
+생길 수 있고, 앞서고 있으면 수익을 지키고 싶은 심리가 생길 수 있다 -- 단, 이런
+경쟁심이 네 원래 성격/전략을 완전히 무너뜨리진 않아야 한다 (예: 안정형이라면
+뒤처져도 무리한 올인은 하지 않는다).
+
 반드시 아래 JSON 형식으로만 답해라. 다른 설명 텍스트는 붙이지 마라.
 {
   "action": "buy" | "short" | "sell" | "hold",
@@ -41,7 +47,11 @@ const DECISION_SCHEMA_PROMPT = `
 }
 `.trim();
 
-async function callClaude(env, persona, leverage, portfolio, market) {
+async function callClaude(env, persona, leverage, portfolio, market, myTodayPct, rivals) {
+  const rivalsText = (rivals || [])
+    .map((r) => `- ${r.name}(${r.badge}): 오늘 ${r.todayPct >= 0 ? '+' : ''}${r.todayPct}%`)
+    .join('\n');
+
   const userContent = `
 [트레이더 성격/전략]
 ${persona}
@@ -57,6 +67,12 @@ ${JSON.stringify(portfolio.holdings)}
 
 [현재 시세]
 ${JSON.stringify(market)}
+
+[오늘 내 수익률]
+${myTodayPct >= 0 ? '+' : ''}${myTodayPct}%
+
+[다른 트레이더들의 오늘 수익률]
+${rivalsText || '(정보 없음)'}
 `.trim();
 
   const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -103,13 +119,13 @@ export default {
       return json({ error: '잘못된 요청 본문' }, 400);
     }
 
-    const { persona, leverage, portfolio, market } = body;
+    const { persona, leverage, portfolio, market, myTodayPct, rivals } = body;
     if (!persona || !portfolio || !market) {
       return json({ error: 'persona, portfolio, market 필드가 모두 필요합니다' }, 400);
     }
 
     try {
-      const decision = await callClaude(env, persona, leverage || 1, portfolio, market);
+      const decision = await callClaude(env, persona, leverage || 1, portfolio, market, myTodayPct || 0, rivals);
       return json(decision);
     } catch (e) {
       return json({ error: e.message }, 500);
