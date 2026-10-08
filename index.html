@@ -332,6 +332,66 @@
     padding: 1px 5px;
     border-radius: 4px;
   }
+  .trader-card { cursor: pointer; }
+  .detail-back {
+    background: none;
+    border: none;
+    color: var(--ink-sub);
+    font-size: 13px;
+    font-weight: 700;
+    padding: 6px 0;
+    margin-bottom: 14px;
+    cursor: pointer;
+  }
+  .detail-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+  }
+  .detail-head .trader-name { font-size: 22px; }
+  .detail-sub {
+    font-size: 13px;
+    color: var(--ink-sub);
+    margin-bottom: 20px;
+  }
+  .day-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .day-row {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 12px 14px;
+  }
+  .day-row-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+  }
+  .day-date { font-weight: 700; font-size: 13.5px; }
+  .day-badge {
+    font-size: 11px;
+    font-weight: 800;
+    padding: 2px 9px;
+    border-radius: 999px;
+  }
+  .day-badge.hit { background: rgba(255, 92, 92, 0.15); color: var(--up); }
+  .day-badge.miss { background: rgba(49, 130, 246, 0.15); color: var(--down); }
+  .day-pct { font-size: 12.5px; color: var(--ink-sub); margin-bottom: 6px; }
+  .day-comment { font-size: 12.5px; color: var(--ink); line-height: 1.5; }
+  .empty-day-list {
+    padding: 24px;
+    text-align: center;
+    color: var(--ink-sub);
+    font-size: 13px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+  }
 </style>
 </head>
 <body>
@@ -347,13 +407,26 @@
       <button type="button" class="auto-mode-toggle on" id="autoModeToggle" aria-label="서버에서 항상 자동 매매 중" disabled></button>
     </div>
 
-    <div class="traders-grid-desktop" id="tradersGridDesktop"></div>
-    <div class="traders-grid-mobile" id="tradersGridMobile"></div>
+    <div id="mainView">
+      <div class="traders-grid-desktop" id="tradersGridDesktop"></div>
+      <div class="traders-grid-mobile" id="tradersGridMobile"></div>
 
-    <div class="section-title">거래 기록</div>
-    <div class="log-list" id="logList"></div>
+      <div class="section-title">거래 기록</div>
+      <div class="log-list" id="logList"></div>
 
-    <div class="config-note" id="configNote" style="display:none"></div>
+      <div class="config-note" id="configNote" style="display:none"></div>
+    </div>
+
+    <div id="detailView" style="display:none">
+      <button type="button" class="detail-back" id="detailBack">← 목록으로</button>
+      <div class="detail-head">
+        <div class="trader-name" id="detailName"></div>
+        <div class="trader-badge" id="detailBadge"></div>
+      </div>
+      <div class="detail-sub" id="detailSub"></div>
+      <div class="section-title">일별 목표 달성 기록 (KST 자정 기준)</div>
+      <div class="day-list" id="dayList"></div>
+    </div>
   </div>
 
 <script>
@@ -388,7 +461,7 @@
         ? `<div class="goal-banner">🎯 오늘 목표 달성! +${t.todayPct.toFixed(1)}% (오늘은 매매 종료)</div>`
         : '';
       return `
-        <div class="trader-card ${t.goalHit ? 'goal-hit' : ''}">
+        <div class="trader-card ${t.goalHit ? 'goal-hit' : ''}" data-trader="${t.id}">
           <div class="trader-head">
             <div class="trader-name">${t.name}</div>
             <div class="trader-badge">${t.badge}</div>
@@ -425,7 +498,7 @@
         ? `<div class="goal-banner">🎯 오늘 목표 달성! +${t.todayPct.toFixed(1)}% (오늘은 매매 종료)</div>`
         : '';
       return `
-        <div class="trader-card ${t.goalHit ? 'goal-hit' : ''}">
+        <div class="trader-card ${t.goalHit ? 'goal-hit' : ''}" data-trader="${t.id}">
           ${goalBannerHtml}
           <div class="trader-main-row">
             <div class="trader-id-group">
@@ -477,7 +550,56 @@
     renderTradersDesktop();
     renderTradersMobile();
     renderLog();
+    if (openTraderId) renderDetail();
   }
+
+  let openTraderId = null;
+
+  function renderDetail() {
+    const t = latestTraders.find((x) => x.id === openTraderId);
+    if (!t) return;
+    document.getElementById('detailName').textContent = t.name;
+    document.getElementById('detailBadge').textContent = t.badge;
+    document.getElementById('detailSub').textContent = `${t.desc} (레버리지 ${t.leverage}x, 하루 목표 +${t.dailyTargetPct}%)`;
+    const dayListEl = document.getElementById('dayList');
+    if (!t.dailyHistory.length) {
+      dayListEl.innerHTML = '<div class="empty-day-list">아직 마감된 날이 없어요. 한국시간 자정이 지나면 그날 기록이 여기 쌓여요.</div>';
+      return;
+    }
+    dayListEl.innerHTML = t.dailyHistory
+      .map((d) => `
+        <div class="day-row">
+          <div class="day-row-top">
+            <span class="day-date">${d.date}</span>
+            <span class="day-badge ${d.hit ? 'hit' : 'miss'}">${d.hit ? '달성' : '미달성'}</span>
+          </div>
+          <div class="day-pct">그날 수익률 ${d.pctReturn >= 0 ? '+' : ''}${d.pctReturn.toFixed(2)}% / 목표 +${d.targetPct}%</div>
+          <div class="day-comment">${d.comment}</div>
+        </div>
+      `)
+      .join('');
+  }
+
+  function showTraderDetail(id) {
+    openTraderId = id;
+    document.getElementById('mainView').style.display = 'none';
+    document.getElementById('detailView').style.display = '';
+    renderDetail();
+  }
+
+  function hideTraderDetail() {
+    openTraderId = null;
+    document.getElementById('detailView').style.display = 'none';
+    document.getElementById('mainView').style.display = '';
+  }
+
+  document.getElementById('detailBack').addEventListener('click', hideTraderDetail);
+  ['tradersGridDesktop', 'tradersGridMobile'].forEach((gridId) => {
+    document.getElementById(gridId).addEventListener('click', (e) => {
+      const card = e.target.closest('.trader-card');
+      if (card) showTraderDetail(card.dataset.trader);
+    });
+  });
 
   async function refreshLoop() {
     try {
