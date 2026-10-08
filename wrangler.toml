@@ -1,3 +1,12 @@
 name = "ai-trader-decide"
 main = "decide-worker.js"
 compatibility_date = "2024-11-01"
+
+[[kv_namespaces]]
+binding = "AI_TRADER_STATE"
+id = "31dbd008a1ec47c188ee853e3e7c49b3"
+
+[triggers]
+# KV 무료 티어 쓰기 한도(1,000회/일)를 넘지 않도록 2분 간격으로 설정.
+# (사이클당 상태 저장은 1회 -- 1분 간격이면 하루 1,440회로 한도 초과)
+crons = ["*/2 * * * *"]

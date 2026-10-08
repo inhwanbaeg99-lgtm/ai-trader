@@ -289,10 +289,10 @@
 
     <div class="auto-mode-row">
       <div>
-        <div class="auto-mode-label">자동 판단 (30초마다)</div>
-        <div class="auto-mode-sub" id="autoModeSub">꺼짐 - 버튼으로만 판단 요청</div>
+        <div class="auto-mode-label">자동 판단 (서버에서 2분마다)</div>
+        <div class="auto-mode-sub" id="autoModeSub">항상 켜짐 - 브라우저를 닫아도 서버가 계속 매매해요</div>
       </div>
-      <button type="button" class="auto-mode-toggle" id="autoModeToggle" aria-label="자동 판단 켜기/끄기"></button>
+      <button type="button" class="auto-mode-toggle on" id="autoModeToggle" aria-label="서버에서 항상 자동 매매 중" disabled></button>
     </div>
 
     <div class="traders-grid" id="tradersGrid"></div>
@@ -304,205 +304,55 @@
   </div>
 
 <script>
-  const START_BALANCE = 10000000; // 트레이더당 가상 시드머니 1천만원
-  const SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT'];
-  const FAPI = 'https://fapi.binance.com/fapi/v1';
+  // 매매 로직/상태는 전부 Cloudflare Worker(+KV)에 있다. 이 페이지는 서버
+  // 상태를 주기적으로 읽어와 보여주기만 하는 뷰어이고, "지금 판단 요청"
+  // 버튼만 서버에 즉시 1회 판단을 요청하는 용도다. 서버 Cron이 2분마다
+  // 알아서 A/B/C를 순서대로 판단시키므로 브라우저를 닫아도 매매는 계속된다.
+  const WORKER_BASE = 'https://ai-trader-decide.inhwanbaeg99.workers.dev';
 
-  // 백엔드(Cloudflare Worker) 엔드포인트 -- 아직 배포 전이면 비워두고,
-  // 배포 후 여기에 실제 Worker URL을 넣으면 '판단 요청' 버튼이 동작한다.
-  const DECIDE_ENDPOINT = 'https://ai-trader-decide.inhwanbaeg99.workers.dev';
-
-  const TRADERS = [
-    {
-      id: 'A',
-      name: 'Trader A',
-      badge: '공격형',
-      desc: '30배 레버리지로 변동성과 모멘텀에 주저 없이 크게 베팅하는 고위험 고수익 성격.',
-      persona: '너는 30배의 초고레버리지를 쓰는 공격적 단기 트레이더다. 변동성과 모멘텀을 확신하면 주저 없이 크게 베팅한다. 작은 가격 움직임도 레버리지로 크게 증폭된다는 걸 알고 있고, 그 변동성 자체를 기회로 여긴다. 손절은 빠르게 끊고, 익절은 끝까지 끌고 간다.',
-      stopLossPct: 2,
-      takeProfitPct: 40,
-      leverage: 30,
-      dailyTargetPct: 30,
-    },
-    {
-      id: 'B',
-      name: 'Trader B',
-      badge: '안정형',
-      desc: '5배의 낮은 레버리지만 쓰면서 리스크 관리를 최우선으로 하는 안정형 성격.',
-      persona: '너는 5배의 낮은 레버리지만 쓰는 보수적인 리스크 관리 중심 트레이더다. 레버리지를 쓰더라도 증거금 비중을 작게 유지해 손실을 제한하고, 한 종목에 증거금의 20% 이상을 넣지 않는다. 확실한 근거가 없으면 관망(hold)을 택하고, 분산 투자를 선호한다.',
-      stopLossPct: 3,
-      takeProfitPct: 10,
-      leverage: 5,
-      dailyTargetPct: 8,
-    },
-    {
-      id: 'C',
-      name: 'Trader C',
-      badge: '역발상형',
-      desc: '15배 레버리지로 시장 심리가 과열/과매도일 때 확신 있게 역으로 베팅하는 역발상 성격.',
-      persona: '너는 15배 레버리지를 쓰는 역발상(contrarian) 투자자다. 단기 급등은 과열로, 단기 급락은 과매도 기회로 해석하며, 확신이 서면 레버리지를 실어 시장과 반대 방향에 베팅한다. 시장 분위기에 휩쓸리지 않는다.',
-      stopLossPct: 4,
-      takeProfitPct: 22,
-      leverage: 15,
-      dailyTargetPct: 18,
-    },
-  ];
-
-  let tickers = {};
-  let portfolios = {};
-  let tradeLog = [];
-  let dailyBase = {}; // { [traderId]: { date: 'YYYY-MM-DD', value } } -- 오늘 하루 수익률 기준점
-
-  function loadState() {
-    TRADERS.forEach((t) => {
-      let p;
-      try {
-        p = JSON.parse(localStorage.getItem(`aitrader_portfolio_${t.id}`));
-      } catch (e) {
-        p = null;
-      }
-      portfolios[t.id] = p || { cash: START_BALANCE, holdings: {} };
-      // 예전 형식(숫자 qty만, 또는 margin 없는 형식)으로 남아있는 데이터 방어적 변환
-      Object.entries(portfolios[t.id].holdings).forEach(([sym, h]) => {
-        if (typeof h === 'number') {
-          const price = tickers[sym] ? Number(tickers[sym].lastPrice) : 0;
-          portfolios[t.id].holdings[sym] = { qty: h, avgPrice: price, margin: h * price * krwRate, side: 'long' };
-        } else {
-          if (h.margin === undefined) h.margin = h.qty * h.avgPrice * krwRate;
-          if (h.side === undefined) h.side = 'long';
-        }
-      });
-    });
-    try {
-      tradeLog = JSON.parse(localStorage.getItem('aitrader_log') || '[]');
-    } catch (e) {
-      tradeLog = [];
-    }
-    TRADERS.forEach((t) => {
-      try {
-        dailyBase[t.id] = JSON.parse(localStorage.getItem(`aitrader_daybase_${t.id}`)) || null;
-      } catch (e) {
-        dailyBase[t.id] = null;
-      }
-    });
-  }
-
-  function savePortfolio(id) {
-    localStorage.setItem(`aitrader_portfolio_${id}`, JSON.stringify(portfolios[id]));
-  }
-  function saveLog() {
-    localStorage.setItem('aitrader_log', JSON.stringify(tradeLog));
-  }
+  let traderMeta = {}; // { [id]: { name } } -- 거래 로그에 트레이더 이름 표시용
+  let latestTraders = [];
+  let latestLog = [];
 
   function fmtWon(n) {
     return Math.round(n).toLocaleString('ko-KR') + '원';
   }
 
-  // 포지션 가치 = 증거금(margin) + 레버리지 손익. 증거금+손익이 0 밑으로
-  // 가면 청산되어 전부 날아간 것으로 보고 0으로 고정한다(실제 마진거래처럼
-  // 증거금 이상 잃지는 않음).
-  function positionPnl(h, currentPrice) {
-    const priceDiff = h.side === 'short' ? h.avgPrice - currentPrice : currentPrice - h.avgPrice;
-    return priceDiff * h.qty * krwRate;
-  }
-
-  function positionValue(h, currentPrice) {
-    return Math.max(0, h.margin + positionPnl(h, currentPrice));
-  }
-
-  function portfolioValue(id) {
-    const p = portfolios[id];
-    let total = p.cash;
-    Object.entries(p.holdings).forEach(([sym, h]) => {
-      const t = tickers[sym];
-      if (t && h.qty > 0) total += positionValue(h, Number(t.lastPrice));
-    });
-    return total;
-  }
-
-  let krwRate = 1400; // 대략치, 실제 환율 API 붙이기 전까지 고정값
-
-  function todayDateStr() {
-    return new Date().toLocaleDateString('en-CA'); // 'YYYY-MM-DD', 로컬 타임존 기준
-  }
-
-  // 날짜가 바뀌었으면(또는 처음이면) 오늘 수익률을 잴 기준점을 현재 평가금액으로
-  // 새로 잡는다. refreshLoop에서 시세를 받아온 직후에만 호출해야 정확하다.
-  function ensureDailyBaseline(id) {
-    const today = todayDateStr();
-    if (!dailyBase[id] || dailyBase[id].date !== today) {
-      dailyBase[id] = { date: today, value: portfolioValue(id) };
-      localStorage.setItem(`aitrader_daybase_${id}`, JSON.stringify(dailyBase[id]));
-    }
-  }
-
-  function todayPct(id) {
-    const base = dailyBase[id];
-    if (!base || base.value <= 0) return 0;
-    return ((portfolioValue(id) - base.value) / base.value) * 100;
-  }
-
-  function goalReached(id) {
-    const trader = TRADERS.find((t) => t.id === id);
-    return todayPct(id) >= trader.dailyTargetPct;
-  }
-
-  async function fetchTickers() {
-    const res = await fetch(`${FAPI}/ticker/24hr`);
-    const data = await res.json();
-    const map = {};
-    data.forEach((t) => {
-      if (SYMBOLS.includes(t.symbol)) map[t.symbol] = t;
-    });
-    tickers = map;
-  }
-
   function renderTraders() {
     const grid = document.getElementById('tradersGrid');
-    grid.innerHTML = TRADERS.map((t) => {
-      const p = portfolios[t.id];
-      const value = portfolioValue(t.id);
-      const pnl = value - START_BALANCE;
-      const pnlPct = (pnl / START_BALANCE) * 100;
-      const pnlCls = pnl > 0 ? 'up' : pnl < 0 ? 'down' : 'flat';
-      const heldEntries = Object.entries(p.holdings).filter(([, h]) => h.qty > 0);
-      const holdingsHtml = heldEntries.length
-        ? heldEntries
-            .map(([sym, h]) => {
-              const tk = tickers[sym];
-              const val = tk ? positionValue(h, Number(tk.lastPrice)) : h.margin;
-              const priceChangePct = tk ? ((Number(tk.lastPrice) - h.avgPrice) / h.avgPrice) * 100 : 0;
+    grid.innerHTML = latestTraders.map((t) => {
+      const pnlCls = t.pnl > 0 ? 'up' : t.pnl < 0 ? 'down' : 'flat';
+      const holdingsHtml = t.holdings.length
+        ? t.holdings
+            .map((h) => {
               const sideLabel = h.side === 'short' ? '숏' : '롱';
-              const pnlPctForSide = h.side === 'short' ? -priceChangePct : priceChangePct;
-              const changeCls = pnlPctForSide > 0 ? 'up' : pnlPctForSide < 0 ? 'down' : '';
-              return `<div class="holding-row"><span class="sym">${sym.replace('USDT', '')} ${sideLabel} ${t.leverage}x</span><span class="val">${fmtWon(val)} <span class="${changeCls}">(${pnlPctForSide >= 0 ? '+' : ''}${pnlPctForSide.toFixed(1)}%)</span></span></div>`;
+              const changeCls = h.pnlPct > 0 ? 'up' : h.pnlPct < 0 ? 'down' : '';
+              return `<div class="holding-row"><span class="sym">${h.symbol.replace('USDT', '')} ${sideLabel} ${t.leverage}x</span><span class="val">${fmtWon(h.value)} <span class="${changeCls}">(${h.pnlPct >= 0 ? '+' : ''}${h.pnlPct.toFixed(1)}%)</span></span></div>`;
             })
             .join('')
         : '<div class="empty-holdings">보유 중인 자산 없음</div>';
-      const todayPctVal = todayPct(t.id);
-      const goalHit = goalReached(t.id);
-      const goalRatio = Math.min(1, Math.abs(todayPctVal) / t.dailyTargetPct);
-      const goalBannerHtml = goalHit
-        ? `<div class="goal-banner">🎯 오늘 목표 달성! +${todayPctVal.toFixed(1)}% (오늘은 매매 종료)</div>`
+      const goalRatio = Math.min(1, Math.abs(t.todayPct) / t.dailyTargetPct);
+      const goalBannerHtml = t.goalHit
+        ? `<div class="goal-banner">🎯 오늘 목표 달성! +${t.todayPct.toFixed(1)}% (오늘은 매매 종료)</div>`
         : '';
       const dailyGoalHtml = `
         <div class="daily-goal-row">
-          <div class="daily-goal-label"><span>오늘 ${todayPctVal >= 0 ? '+' : ''}${todayPctVal.toFixed(1)}%</span><span>목표 +${t.dailyTargetPct}%</span></div>
-          <div class="daily-goal-bar"><div class="daily-goal-fill ${todayPctVal < 0 ? 'negative' : ''}" style="width:${goalRatio * 100}%"></div></div>
+          <div class="daily-goal-label"><span>오늘 ${t.todayPct >= 0 ? '+' : ''}${t.todayPct.toFixed(1)}%</span><span>목표 +${t.dailyTargetPct}%</span></div>
+          <div class="daily-goal-bar"><div class="daily-goal-fill ${t.todayPct < 0 ? 'negative' : ''}" style="width:${goalRatio * 100}%"></div></div>
         </div>
       `;
-      const btnDisabled = !DECIDE_ENDPOINT || goalHit;
-      const btnLabel = !DECIDE_ENDPOINT ? '백엔드 미연결' : goalHit ? '오늘 목표 달성 - 종료' : '지금 판단 요청';
+      const btnDisabled = t.goalHit;
+      const btnLabel = t.goalHit ? '오늘 목표 달성 - 종료' : '지금 판단 요청';
       return `
-        <div class="trader-card ${goalHit ? 'goal-hit' : ''}">
+        <div class="trader-card ${t.goalHit ? 'goal-hit' : ''}">
           <div class="trader-head">
             <div class="trader-name">${t.name}</div>
             <div class="trader-badge">${t.badge}</div>
           </div>
           <div class="trader-desc">${t.desc}</div>
           ${goalBannerHtml}
-          <div class="trader-balance">${fmtWon(value)}</div>
-          <div class="trader-pnl ${pnlCls}">${pnl >= 0 ? '+' : ''}${fmtWon(pnl)} (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%)</div>
+          <div class="trader-balance">${fmtWon(t.value)}</div>
+          <div class="trader-pnl ${pnlCls}">${t.pnl >= 0 ? '+' : ''}${fmtWon(t.pnl)} (${t.pnlPct >= 0 ? '+' : ''}${t.pnlPct.toFixed(2)}%)</div>
           ${dailyGoalHtml}
           <div class="trader-holdings">${holdingsHtml}</div>
           <button type="button" class="decide-btn" data-trader="${t.id}" ${btnDisabled ? 'disabled' : ''}>
@@ -520,16 +370,13 @@
 
   function renderLog() {
     const logEl = document.getElementById('logList');
-    if (!tradeLog.length) {
+    if (!latestLog.length) {
       logEl.innerHTML = '<div class="empty-log">아직 거래 기록이 없어요. "지금 판단 요청" 버튼을 눌러보세요.</div>';
       return;
     }
-    logEl.innerHTML = tradeLog
-      .slice()
-      .reverse()
-      .slice(0, 50)
+    logEl.innerHTML = latestLog
       .map((l) => {
-        const traderName = TRADERS.find((t) => t.id === l.traderId)?.name || l.traderId;
+        const traderName = traderMeta[l.traderId]?.name || l.traderId;
         const time = new Date(l.ts).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
         const actionLabel = l.action === 'buy' ? '롱 진입' : l.action === 'short' ? '숏 진입' : l.action === 'sell' ? '청산' : '관망';
         return `
@@ -545,47 +392,34 @@
       .join('');
   }
 
+  function applyView(view) {
+    latestTraders = view.traders;
+    latestLog = view.tradeLog;
+    traderMeta = {};
+    view.traders.forEach((t) => { traderMeta[t.id] = { name: t.name }; });
+    renderTraders();
+    renderLog();
+  }
+
   async function requestDecision(traderId) {
-    const trader = TRADERS.find((t) => t.id === traderId);
     const statusEl = document.getElementById(`status-${traderId}`);
     const btn = document.querySelector(`.decide-btn[data-trader="${traderId}"]`);
-    if (!DECIDE_ENDPOINT) {
-      statusEl.textContent = '아직 백엔드(Worker)가 연결되지 않았어요.';
-      return;
-    }
-    if (goalReached(traderId)) {
-      statusEl.textContent = '오늘 목표 달성해서 매매 종료됐어요. 내일 다시 시작해요.';
-      return;
-    }
     btn.disabled = true;
     statusEl.textContent = '판단 요청 중...';
     try {
-      const market = SYMBOLS.map((s) => {
-        const t = tickers[s];
-        return t ? { symbol: s, price: Number(t.lastPrice), changePercent: Number(t.priceChangePercent) } : null;
-      }).filter(Boolean);
-      // 다른 트레이더들 성적(오늘 수익률)을 같이 보내서 경쟁심을 느끼게 한다
-      const rivals = TRADERS.filter((x) => x.id !== traderId).map((x) => ({
-        name: x.name,
-        badge: x.badge,
-        todayPct: Number(todayPct(x.id).toFixed(2)),
-      }));
-      const res = await fetch(DECIDE_ENDPOINT, {
+      const res = await fetch(`${WORKER_BASE}/decide-now`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          persona: trader.persona,
-          leverage: trader.leverage,
-          portfolio: portfolios[traderId],
-          market,
-          myTodayPct: Number(todayPct(traderId).toFixed(2)),
-          rivals,
-        }),
+        body: JSON.stringify({ traderId }),
       });
       if (!res.ok) throw new Error('요청 실패');
-      const decision = await res.json(); // { action: 'buy'|'sell'|'hold', symbol, amountKrw, reason }
-      applyDecision(traderId, decision);
-      statusEl.textContent = '완료';
+      const data = await res.json();
+      applyView(data.view);
+      statusEl.textContent = data.result.skipped
+        ? '오늘 목표 달성해서 매매 종료됐어요.'
+        : data.result.error
+        ? '오류: ' + data.result.error
+        : '완료';
     } catch (e) {
       statusEl.textContent = '오류: ' + e.message;
     } finally {
@@ -593,146 +427,18 @@
     }
   }
 
-  function applyDecision(traderId, decision) {
-    const p = portfolios[traderId];
-    const trader = TRADERS.find((x) => x.id === traderId);
-    const { action, symbol, amountKrw, reason } = decision;
-    if ((action === 'buy' || action === 'short') && symbol && amountKrw > 0) {
-      const side = action === 'short' ? 'short' : 'long';
-      const t = tickers[symbol];
-      const prev = p.holdings[symbol];
-      // 반대 방향 포지션을 이미 들고 있으면 무시 -- 먼저 sell로 청산해야 한다
-      const blocked = prev && prev.qty > 0 && prev.side !== side;
-      if (t && !blocked && p.cash >= amountKrw) {
-        const price = Number(t.lastPrice);
-        const margin = amountKrw; // 실제로 현금에서 빠지는 증거금
-        const notional = margin * trader.leverage; // 레버리지 적용된 포지션 크기
-        const qty = notional / (price * krwRate);
-        const base = prev && prev.qty > 0 ? prev : { qty: 0, avgPrice: price, margin: 0, side };
-        const newQty = base.qty + qty;
-        // 추가 진입 시 평균 단가를 수량 가중 평균으로 갱신
-        const newAvgPrice = (base.qty * base.avgPrice + qty * price) / newQty;
-        p.holdings[symbol] = { qty: newQty, avgPrice: newAvgPrice, margin: base.margin + margin, side };
-        p.cash -= margin;
-      }
-    } else if (action === 'sell' && symbol) {
-      const t = tickers[symbol];
-      const prev = p.holdings[symbol];
-      if (t && prev && prev.qty > 0) {
-        const price = Number(t.lastPrice);
-        // amountKrw는 '청산하고 싶은 증거금 규모'로 해석, 없으면 전량 청산
-        const fraction = amountKrw ? Math.min(1, amountKrw / prev.margin) : 1;
-        const sellQty = prev.qty * fraction;
-        const releasedMargin = prev.margin * fraction;
-        const pnl = positionPnl({ ...prev, qty: sellQty }, price);
-        p.cash += Math.max(0, releasedMargin + pnl);
-        p.holdings[symbol] = { qty: prev.qty - sellQty, avgPrice: prev.avgPrice, margin: prev.margin - releasedMargin, side: prev.side };
-      }
-    }
-    savePortfolio(traderId);
-    tradeLog.push({ traderId, action, symbol, reason, ts: Date.now() });
-    saveLog();
-    renderTraders();
-    renderLog();
-  }
-
-  // LLM 호출 없이, 가격이 갱신될 때마다(5초마다) 보유 포지션의 평균 매입가
-  // 대비 손익률을 즉시 체크해서 손절/익절 라인을 건드리면 바로 전량 매도한다.
-  // '판단 요청' 주기(최대 5분) 사이에 급락/급등 타이밍을 놓치는 걸 막기 위한
-  // 안전장치 -- API 비용 없음.
-  function checkStopLossAndTakeProfit() {
-    TRADERS.forEach((t) => {
-      const p = portfolios[t.id];
-      Object.entries(p.holdings).forEach(([symbol, h]) => {
-        if (h.qty <= 0) return;
-        const tk = tickers[symbol];
-        if (!tk) return;
-        const price = Number(tk.lastPrice);
-        const priceChangePct = ((price - h.avgPrice) / h.avgPrice) * 100;
-        const pnlPct = h.side === 'short' ? -priceChangePct : priceChangePct; // 포지션 기준 손익률
-        const value = positionValue(h, price);
-        const sideLabel = h.side === 'short' ? '숏' : '롱';
-        let triggered = null;
-        if (value <= 0) {
-          triggered = `강제 청산 (${sideLabel} 레버리지 ${t.leverage}x, 증거금 전액 손실)`;
-        } else if (pnlPct <= -t.stopLossPct) {
-          triggered = `자동 손절 (${sideLabel}, 손익 ${pnlPct.toFixed(1)}%, 기준 -${t.stopLossPct}%)`;
-        } else if (pnlPct >= t.takeProfitPct) {
-          triggered = `자동 익절 (${sideLabel}, 손익 +${pnlPct.toFixed(1)}%, 기준 +${t.takeProfitPct}%)`;
-        }
-        if (triggered) {
-          p.cash += value;
-          p.holdings[symbol] = { qty: 0, avgPrice: h.avgPrice, margin: 0, side: h.side };
-          savePortfolio(t.id);
-          tradeLog.push({ traderId: t.id, action: 'sell', symbol, reason: triggered, auto: true, ts: Date.now() });
-          saveLog();
-        }
-      });
-    });
-  }
-
   async function refreshLoop() {
     try {
-      await fetchTickers();
-      document.getElementById('priceUpdatedNote').textContent = `${new Date().toLocaleTimeString('ko-KR')} 기준 시세`;
-      TRADERS.forEach((t) => ensureDailyBaseline(t.id));
-      checkStopLossAndTakeProfit();
-      renderTraders();
-      renderLog();
+      const res = await fetch(`${WORKER_BASE}/state`);
+      if (!res.ok) throw new Error('상태 조회 실패');
+      const view = await res.json();
+      applyView(view);
+      document.getElementById('priceUpdatedNote').textContent = `${new Date(view.serverTime).toLocaleTimeString('ko-KR')} 기준 (서버 자동매매 2분마다 실행 중)`;
     } catch (e) {
-      document.getElementById('priceUpdatedNote').textContent = '시세 로딩 실패, 재시도 중...';
+      document.getElementById('priceUpdatedNote').textContent = '서버 상태 로딩 실패, 재시도 중...';
     }
   }
 
-  function showConfigNoteIfNeeded() {
-    if (DECIDE_ENDPOINT) return;
-    const note = document.getElementById('configNote');
-    note.style.display = '';
-    note.innerHTML = `백엔드(Claude API 프록시)가 아직 연결 안 됐어요. Cloudflare Worker 배포 후 <code>index.html</code>의 <code>DECIDE_ENDPOINT</code> 값을 Worker URL로 채워주세요.`;
-  }
-
-  // 자동 판단: 켜두면 30초마다 트레이더 A/B/C 순서로 판단 요청을 돌린다.
-  // Haiku 모델이라 호출당 비용/속도는 가볍지만, 그래도 틱 단위 스캘핑까진
-  // 아니고 빠른 스윙 정도의 자동화다.
-  const AUTO_INTERVAL_MS = 30 * 1000;
-  let autoMode = localStorage.getItem('aitrader_auto') === '1';
-  let autoTimer = null;
-
-  function updateAutoModeUI() {
-    const toggle = document.getElementById('autoModeToggle');
-    const sub = document.getElementById('autoModeSub');
-    toggle.classList.toggle('on', autoMode);
-    sub.textContent = autoMode
-      ? (DECIDE_ENDPOINT ? '켜짐 - 30초마다 A/B/C 순서로 자동 판단' : '켜짐 (백엔드 미연결이라 대기 중)')
-      : '꺼짐 - 버튼으로만 판단 요청';
-  }
-
-  async function runAutoCycle() {
-    if (!DECIDE_ENDPOINT) return;
-    for (const t of TRADERS) {
-      await requestDecision(t.id);
-      await new Promise((r) => setTimeout(r, 2000)); // 호출 간 약간 간격
-    }
-  }
-
-  function setAutoMode(on) {
-    autoMode = on;
-    localStorage.setItem('aitrader_auto', on ? '1' : '0');
-    updateAutoModeUI();
-    if (autoTimer) clearInterval(autoTimer);
-    if (autoMode) {
-      runAutoCycle();
-      autoTimer = setInterval(runAutoCycle, AUTO_INTERVAL_MS);
-    }
-  }
-
-  document.getElementById('autoModeToggle').addEventListener('click', () => setAutoMode(!autoMode));
-
-  loadState();
-  renderTraders();
-  renderLog();
-  showConfigNoteIfNeeded();
-  setAutoMode(autoMode);
   refreshLoop();
   setInterval(refreshLoop, 5000);
 </script>
