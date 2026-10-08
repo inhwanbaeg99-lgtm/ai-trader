@@ -23,7 +23,7 @@ function json(data, status = 200) {
 const START_BALANCE = 10000000; // 트레이더당 가상 시드머니 1천만원
 const SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT'];
 const KRW_RATE = 1400; // 대략치, 실제 환율 API 붙이기 전까지 고정값
-const INTERVAL_SECONDS = 15; // 판단 주기 -- 사이클 처리 시간(수 초)이 더해지니 실제 간격은 이보다 조금 길다
+const INTERVAL_SECONDS = 60; // 판단 주기 -- 비용 대비 효율을 고려해 15초에서 1분으로 조정
 
 // 시세 소스 변천사: Binance(fapi/api 전부)·Bybit·CoinGecko는 Cloudflare
 // Workers 엣지 IP를 아예 차단(403/451/429)한다. OKX는 처음엔 됐지만 이후
@@ -76,11 +76,42 @@ const TRADERS = [
 function defaultState() {
   const portfolios = {};
   const dailyBase = {};
+  const tradeHistory = {};
   TRADERS.forEach((t) => {
     portfolios[t.id] = { cash: START_BALANCE, holdings: {} };
     dailyBase[t.id] = null;
+    tradeHistory[t.id] = [];
   });
-  return { portfolios, dailyBase, tradeLog: [], tickers: {} };
+  return { portfolios, dailyBase, tradeLog: [], tickers: {}, tradeHistory };
+}
+
+// 실제 모델 파인튜닝은 아니고, 트레이더별 "청산된 거래의 실현손익" 기록을
+// 따로 모아뒀다가 다음 판단 프롬프트에 요약해서 넣어주는 식의 자기반성
+// 피드백 루프 -- 최근 전적(승률/평균손익)을 보고 스스로 전략을 미세조정하게 한다.
+const TRADE_HISTORY_LIMIT = 30;
+
+function recordClosedTrade(state, traderId, entry) {
+  const hist = state.tradeHistory[traderId] || (state.tradeHistory[traderId] = []);
+  hist.push(entry);
+  if (hist.length > TRADE_HISTORY_LIMIT) hist.splice(0, hist.length - TRADE_HISTORY_LIMIT);
+}
+
+function computePerformanceStats(state, traderId) {
+  const hist = state.tradeHistory[traderId] || [];
+  if (!hist.length) return { count: 0, wins: 0, winRate: 0, avgPnl: 0, recent: [] };
+  const wins = hist.filter((h) => h.pnl > 0).length;
+  const winRate = (wins / hist.length) * 100;
+  const avgPnl = hist.reduce((s, h) => s + h.pnl, 0) / hist.length;
+  return { count: hist.length, wins, winRate, avgPnl, recent: hist.slice(-5) };
+}
+
+function buildPerformanceSummary(state, traderId) {
+  const stats = computePerformanceStats(state, traderId);
+  if (!stats.count) return '아직 청산한 거래 기록이 없음 (참고할 과거 전적 없음).';
+  const recentText = stats.recent
+    .map((h) => `${h.symbol.replace('USDT', '')} ${h.pnl >= 0 ? '+' : ''}${Math.round(h.pnl).toLocaleString('ko-KR')}원`)
+    .join(', ');
+  return `최근 청산 ${stats.count}건 중 ${stats.wins}승 ${stats.count - stats.wins}패 (승률 ${stats.winRate.toFixed(0)}%), 평균 손익 ${stats.avgPnl >= 0 ? '+' : ''}${Math.round(stats.avgPnl).toLocaleString('ko-KR')}원. 최근 거래: ${recentText}`;
 }
 
 // 원래 프론트엔드가 브라우저 로컬 타임존(한국 사용자 기준 KST) 자정에
@@ -174,9 +205,11 @@ function checkStopLossAndTakeProfit(state, tickers) {
         triggered = `자동 익절 (${sideLabel}, 손익 +${pnlPct.toFixed(1)}%, 기준 +${t.takeProfitPct}%)`;
       }
       if (triggered) {
+        const realizedPnl = positionPnl(h, price);
         p.cash += value;
         p.holdings[symbol] = { qty: 0, avgPrice: h.avgPrice, margin: 0, side: h.side };
         state.tradeLog.push({ traderId: t.id, action: 'sell', symbol, reason: triggered, auto: true, ts: Date.now() });
+        recordClosedTrade(state, t.id, { symbol, pnl: realizedPnl, pnlPct, ts: Date.now() });
       }
     });
   });
@@ -211,8 +244,11 @@ function applyDecision(state, traderId, decision, tickers) {
       const sellQty = prev.qty * fraction;
       const releasedMargin = prev.margin * fraction;
       const pnl = positionPnl({ ...prev, qty: sellQty }, price);
+      const priceChangePct = ((price - prev.avgPrice) / prev.avgPrice) * 100;
+      const pnlPct = prev.side === 'short' ? -priceChangePct : priceChangePct;
       p.cash += Math.max(0, releasedMargin + pnl);
       p.holdings[symbol] = { qty: prev.qty - sellQty, avgPrice: prev.avgPrice, margin: prev.margin - releasedMargin, side: prev.side };
+      recordClosedTrade(state, traderId, { symbol, pnl, pnlPct, ts: Date.now() });
     }
   }
   state.tradeLog.push({ traderId, action, symbol, reason, auto: !!decision.auto, ts: Date.now() });
@@ -243,6 +279,12 @@ const DECISION_SCHEMA_PROMPT = `
 경쟁심이 네 원래 성격/전략을 완전히 무너뜨리진 않아야 한다 (예: 레인지 스캘퍼라면
 뒤처져도 범위를 크게 벗어난 무리한 베팅은 하지 않는다).
 
+아래에 네가 최근에 청산했던 거래들의 실제 손익 전적(승률/평균손익)이 요약되어
+주어진다. 이건 네 모델 자체가 학습된 게 아니라 매번 참고하라고 주는 경험
+피드백이다 -- 최근 승률이 낮거나 특정 심볼/패턴에서 반복적으로 손실이 났다면
+그 패턴을 경계하고, 반대로 잘 통하고 있는 접근은 유지해라. 단, 몇 건 안 되는
+표본으로 성격 자체를 뒤집진 마라.
+
 반드시 아래 JSON 형식으로만 답해라. 다른 설명 텍스트는 붙이지 마라.
 {
   "action": "buy" | "short" | "sell" | "hold",
@@ -253,7 +295,7 @@ const DECISION_SCHEMA_PROMPT = `
 }
 `.trim();
 
-async function callClaude(env, persona, leverage, portfolio, market, myTodayPct, rivals) {
+async function callClaude(env, persona, leverage, portfolio, market, myTodayPct, rivals, performanceSummary) {
   const rivalsText = (rivals || [])
     .map((r) => `- ${r.name}(${r.badge}): 오늘 ${r.todayPct >= 0 ? '+' : ''}${r.todayPct}%`)
     .join('\n');
@@ -279,6 +321,9 @@ ${myTodayPct >= 0 ? '+' : ''}${myTodayPct}%
 
 [다른 트레이더들의 오늘 수익률]
 ${rivalsText || '(정보 없음)'}
+
+[최근 내 거래 성과 피드백]
+${performanceSummary}
 `.trim();
 
   const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -330,7 +375,8 @@ async function runTraderDecision(env, state, tickers, traderId, auto) {
       state.portfolios[traderId],
       market,
       Number(todayPct(state, traderId, tickers).toFixed(2)),
-      rivals
+      rivals,
+      buildPerformanceSummary(state, traderId)
     );
     applyDecision(state, traderId, { ...decision, auto }, tickers);
     return { traderId, skipped: false, decision };
@@ -356,6 +402,7 @@ function buildStateView(state, tickers) {
         const pnlPctForSide = h.side === 'short' ? -priceChangePct : priceChangePct;
         return { symbol, side: h.side, value: val, pnlPct: pnlPctForSide };
       });
+    const perf = computePerformanceStats(state, t.id);
     return {
       id: t.id,
       name: t.name,
@@ -369,6 +416,8 @@ function buildStateView(state, tickers) {
       todayPct: todayPctVal,
       goalHit: todayPctVal >= t.dailyTargetPct,
       holdings,
+      closedTrades: perf.count,
+      winRate: perf.count ? Math.round(perf.winRate) : null,
     };
   });
   return {
@@ -405,6 +454,7 @@ export class TraderEngine {
       dailyBase: { ...base.dailyBase, ...raw.dailyBase },
       tradeLog: Array.isArray(raw.tradeLog) ? raw.tradeLog : [],
       tickers: raw.tickers || {},
+      tradeHistory: { ...base.tradeHistory, ...raw.tradeHistory },
     };
   }
 
