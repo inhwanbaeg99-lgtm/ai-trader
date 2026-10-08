@@ -222,10 +222,17 @@
     border: none;
     border-radius: 10px;
     background: var(--accent);
-    color: #ffffff;
+    color: var(--ink-sub);
     font-weight: 700;
     font-size: 13.5px;
     cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .decide-btn svg {
+    width: 16px;
+    height: 16px;
   }
   .decide-btn:disabled {
     opacity: 0.5;
@@ -301,7 +308,7 @@
 
     <div class="auto-mode-row">
       <div>
-        <div class="auto-mode-label">자동 판단 (서버에서 2분마다)</div>
+        <div class="auto-mode-label">자동 매매 (서버에서 2분마다)</div>
         <div class="auto-mode-sub" id="autoModeSub">항상 켜짐 - 브라우저를 닫아도 서버가 계속 매매해요</div>
       </div>
       <button type="button" class="auto-mode-toggle on" id="autoModeToggle" aria-label="서버에서 항상 자동 매매 중" disabled></button>
@@ -354,7 +361,9 @@
         </div>
       `;
       const btnDisabled = t.goalHit;
-      const btnLabel = t.goalHit ? '오늘 목표 달성 - 종료' : '판단';
+      const btnLabel = t.goalHit
+        ? '오늘 목표 달성 - 종료'
+        : '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg>';
       return `
         <div class="trader-card ${t.goalHit ? 'goal-hit' : ''}">
           <div class="trader-head">
@@ -367,7 +376,7 @@
           <div class="trader-pnl ${pnlCls}">${t.pnl >= 0 ? '+' : ''}${fmtWon(t.pnl)} (${t.pnlPct >= 0 ? '+' : ''}${t.pnlPct.toFixed(2)}%)</div>
           ${dailyGoalHtml}
           <div class="trader-holdings">${holdingsHtml}</div>
-          <button type="button" class="decide-btn" data-trader="${t.id}" ${btnDisabled ? 'disabled' : ''}>
+          <button type="button" class="decide-btn" data-trader="${t.id}" title="지금 판단 요청" aria-label="지금 판단 요청" ${btnDisabled ? 'disabled' : ''}>
             ${btnLabel}
           </button>
           <div class="trader-status" id="status-${t.id}"></div>
