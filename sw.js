@@ -1,7 +1,7 @@
 // PWA 설치/오프라인 셸 캐싱용 서비스워커. 매매 데이터는 Cloudflare Worker에서
 // 실시간으로 가져와야 의미가 있으므로 여기서는 건드리지 않고, 앱 셸(정적
 // 파일)만 캐싱해서 오프라인이거나 네트워크가 느릴 때도 화면은 뜨게 한다.
-const CACHE_NAME = 'tradex-shell-v1';
+const CACHE_NAME = 'tradex-shell-v2';
 const SHELL_FILES = [
   './',
   './index.html',
