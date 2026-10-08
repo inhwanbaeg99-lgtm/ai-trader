@@ -36,7 +36,7 @@
   .wrap {
     max-width: 920px;
     margin: 0 auto;
-    padding: 20px 16px 80px;
+    padding: calc(20px + env(safe-area-inset-top)) 16px 80px;
   }
   .page-title {
     font-size: 24px;
@@ -190,7 +190,7 @@
   .traders-grid-desktop .daily-goal-fill {
     height: 100%;
     border-radius: 999px;
-    background: var(--accent);
+    background: var(--up);
     transition: width 0.4s ease;
   }
   .traders-grid-desktop .daily-goal-fill.negative { background: var(--down); }
@@ -262,7 +262,7 @@
   .traders-grid-mobile .daily-goal-fill {
     height: 100%;
     border-radius: 999px;
-    background: var(--accent);
+    background: var(--up);
     transition: width 0.4s ease;
   }
   .traders-grid-mobile .daily-goal-fill.negative { background: var(--down); }
