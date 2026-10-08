@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no, viewport-fit=cover" />
-<title>Tradee</title>
+<title>TradeX</title>
 <style>
   :root {
     --bg: #f2f4f6;
@@ -204,7 +204,8 @@
   .log-time { color: var(--ink-sub); }
   .log-action { font-weight: 700; }
   .log-action.buy { color: var(--up); }
-  .log-action.sell { color: var(--down); }
+  .log-action.short { color: var(--down); }
+  .log-action.sell { color: var(--ink); }
   .log-action.hold { color: var(--ink-sub); }
   .log-reason {
     color: var(--ink-sub);
@@ -236,7 +237,7 @@
 </head>
 <body>
   <div class="wrap">
-    <div class="page-title">Tradee</div>
+    <div class="page-title">TradeX</div>
     <div class="page-sub" id="priceUpdatedNote">시세 불러오는 중...</div>
 
     <div class="auto-mode-row">
@@ -267,7 +268,7 @@
   const TRADERS = [
     {
       id: 'A',
-      name: '트레이더 A',
+      name: 'Trader A',
       badge: '공격형',
       desc: '변동성이 크더라도 추세와 모멘텀을 믿고 과감하게 베팅하는 성격.',
       persona: '너는 공격적인 단기 트레이더다. 변동성과 모멘텀을 적극적으로 추종하며, 확신이 서면 포지션을 크게 가져간다. 손절은 빠르지만 익절은 길게 끌고 간다.',
@@ -277,7 +278,7 @@
     },
     {
       id: 'B',
-      name: '트레이더 B',
+      name: 'Trader B',
       badge: '안정형',
       desc: '리스크 관리를 최우선으로, 분산과 작은 포지션을 선호하는 성격.',
       persona: '너는 보수적인 리스크 관리 중심 트레이더다. 한 종목에 자산의 20% 이상을 넣지 않고, 확실한 근거가 없으면 관망(hold)을 택한다. 분산 투자를 선호한다.',
@@ -287,7 +288,7 @@
     },
     {
       id: 'C',
-      name: '트레이더 C',
+      name: 'Trader C',
       badge: '역발상형',
       desc: '시장 심리가 과열되거나 과매도일 때 역으로 움직이는 역발상 투자 성격.',
       persona: '너는 역발상(contrarian) 투자자다. 단기 급등은 과열로, 단기 급락은 과매도 기회로 해석하는 경향이 있다. 시장 분위기에 휩쓸리지 않는다.',
@@ -314,9 +315,10 @@
       Object.entries(portfolios[t.id].holdings).forEach(([sym, h]) => {
         if (typeof h === 'number') {
           const price = tickers[sym] ? Number(tickers[sym].lastPrice) : 0;
-          portfolios[t.id].holdings[sym] = { qty: h, avgPrice: price, margin: h * price * krwRate };
-        } else if (h.margin === undefined) {
-          h.margin = h.qty * h.avgPrice * krwRate;
+          portfolios[t.id].holdings[sym] = { qty: h, avgPrice: price, margin: h * price * krwRate, side: 'long' };
+        } else {
+          if (h.margin === undefined) h.margin = h.qty * h.avgPrice * krwRate;
+          if (h.side === undefined) h.side = 'long';
         }
       });
     });
@@ -341,9 +343,13 @@
   // 포지션 가치 = 증거금(margin) + 레버리지 손익. 증거금+손익이 0 밑으로
   // 가면 청산되어 전부 날아간 것으로 보고 0으로 고정한다(실제 마진거래처럼
   // 증거금 이상 잃지는 않음).
+  function positionPnl(h, currentPrice) {
+    const priceDiff = h.side === 'short' ? h.avgPrice - currentPrice : currentPrice - h.avgPrice;
+    return priceDiff * h.qty * krwRate;
+  }
+
   function positionValue(h, currentPrice) {
-    const pnl = (currentPrice - h.avgPrice) * h.qty * krwRate;
-    return Math.max(0, h.margin + pnl);
+    return Math.max(0, h.margin + positionPnl(h, currentPrice));
   }
 
   function portfolioValue(id) {
@@ -382,9 +388,11 @@
             .map(([sym, h]) => {
               const tk = tickers[sym];
               const val = tk ? positionValue(h, Number(tk.lastPrice)) : h.margin;
-              const changePct = tk ? ((Number(tk.lastPrice) - h.avgPrice) / h.avgPrice) * 100 : 0;
-              const changeCls = changePct > 0 ? 'up' : changePct < 0 ? 'down' : '';
-              return `<div class="holding-row"><span class="sym">${sym.replace('USDT', '')} ${t.leverage}x</span><span class="val">${fmtWon(val)} <span class="${changeCls}">(가격 ${changePct >= 0 ? '+' : ''}${changePct.toFixed(1)}%)</span></span></div>`;
+              const priceChangePct = tk ? ((Number(tk.lastPrice) - h.avgPrice) / h.avgPrice) * 100 : 0;
+              const sideLabel = h.side === 'short' ? '숏' : '롱';
+              const pnlPctForSide = h.side === 'short' ? -priceChangePct : priceChangePct;
+              const changeCls = pnlPctForSide > 0 ? 'up' : pnlPctForSide < 0 ? 'down' : '';
+              return `<div class="holding-row"><span class="sym">${sym.replace('USDT', '')} ${sideLabel} ${t.leverage}x</span><span class="val">${fmtWon(val)} <span class="${changeCls}">(${pnlPctForSide >= 0 ? '+' : ''}${pnlPctForSide.toFixed(1)}%)</span></span></div>`;
             })
             .join('')
         : '<div class="empty-holdings">보유 중인 자산 없음</div>';
@@ -424,7 +432,7 @@
       .map((l) => {
         const traderName = TRADERS.find((t) => t.id === l.traderId)?.name || l.traderId;
         const time = new Date(l.ts).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-        const actionLabel = l.action === 'buy' ? '매수' : l.action === 'sell' ? '매도' : '관망';
+        const actionLabel = l.action === 'buy' ? '롱 진입' : l.action === 'short' ? '숏 진입' : l.action === 'sell' ? '청산' : '관망';
         return `
           <div class="log-row">
             <div class="log-top">
@@ -478,18 +486,22 @@
     const p = portfolios[traderId];
     const trader = TRADERS.find((x) => x.id === traderId);
     const { action, symbol, amountKrw, reason } = decision;
-    if (action === 'buy' && symbol && amountKrw > 0) {
+    if ((action === 'buy' || action === 'short') && symbol && amountKrw > 0) {
+      const side = action === 'short' ? 'short' : 'long';
       const t = tickers[symbol];
-      if (t && p.cash >= amountKrw) {
+      const prev = p.holdings[symbol];
+      // 반대 방향 포지션을 이미 들고 있으면 무시 -- 먼저 sell로 청산해야 한다
+      const blocked = prev && prev.qty > 0 && prev.side !== side;
+      if (t && !blocked && p.cash >= amountKrw) {
         const price = Number(t.lastPrice);
         const margin = amountKrw; // 실제로 현금에서 빠지는 증거금
         const notional = margin * trader.leverage; // 레버리지 적용된 포지션 크기
         const qty = notional / (price * krwRate);
-        const prev = p.holdings[symbol] || { qty: 0, avgPrice: price, margin: 0 };
-        const newQty = prev.qty + qty;
-        // 추가 매수 시 평균 매입가를 수량 가중 평균으로 갱신
-        const newAvgPrice = (prev.qty * prev.avgPrice + qty * price) / newQty;
-        p.holdings[symbol] = { qty: newQty, avgPrice: newAvgPrice, margin: prev.margin + margin };
+        const base = prev && prev.qty > 0 ? prev : { qty: 0, avgPrice: price, margin: 0, side };
+        const newQty = base.qty + qty;
+        // 추가 진입 시 평균 단가를 수량 가중 평균으로 갱신
+        const newAvgPrice = (base.qty * base.avgPrice + qty * price) / newQty;
+        p.holdings[symbol] = { qty: newQty, avgPrice: newAvgPrice, margin: base.margin + margin, side };
         p.cash -= margin;
       }
     } else if (action === 'sell' && symbol) {
@@ -497,13 +509,13 @@
       const prev = p.holdings[symbol];
       if (t && prev && prev.qty > 0) {
         const price = Number(t.lastPrice);
-        // amountKrw는 '팔고 싶은 증거금 규모'로 해석, 없으면 전량 청산
+        // amountKrw는 '청산하고 싶은 증거금 규모'로 해석, 없으면 전량 청산
         const fraction = amountKrw ? Math.min(1, amountKrw / prev.margin) : 1;
         const sellQty = prev.qty * fraction;
         const releasedMargin = prev.margin * fraction;
-        const pnl = (price - prev.avgPrice) * sellQty * krwRate;
+        const pnl = positionPnl({ ...prev, qty: sellQty }, price);
         p.cash += Math.max(0, releasedMargin + pnl);
-        p.holdings[symbol] = { qty: prev.qty - sellQty, avgPrice: prev.avgPrice, margin: prev.margin - releasedMargin };
+        p.holdings[symbol] = { qty: prev.qty - sellQty, avgPrice: prev.avgPrice, margin: prev.margin - releasedMargin, side: prev.side };
       }
     }
     savePortfolio(traderId);
@@ -525,19 +537,21 @@
         const tk = tickers[symbol];
         if (!tk) return;
         const price = Number(tk.lastPrice);
-        const changePct = ((price - h.avgPrice) / h.avgPrice) * 100;
+        const priceChangePct = ((price - h.avgPrice) / h.avgPrice) * 100;
+        const pnlPct = h.side === 'short' ? -priceChangePct : priceChangePct; // 포지션 기준 손익률
         const value = positionValue(h, price);
+        const sideLabel = h.side === 'short' ? '숏' : '롱';
         let triggered = null;
         if (value <= 0) {
-          triggered = `강제 청산 (레버리지 ${t.leverage}x, 증거금 전액 손실)`;
-        } else if (changePct <= -t.stopLossPct) {
-          triggered = `자동 손절 (가격 ${changePct.toFixed(1)}%, 기준 -${t.stopLossPct}%)`;
-        } else if (changePct >= t.takeProfitPct) {
-          triggered = `자동 익절 (가격 +${changePct.toFixed(1)}%, 기준 +${t.takeProfitPct}%)`;
+          triggered = `강제 청산 (${sideLabel} 레버리지 ${t.leverage}x, 증거금 전액 손실)`;
+        } else if (pnlPct <= -t.stopLossPct) {
+          triggered = `자동 손절 (${sideLabel}, 손익 ${pnlPct.toFixed(1)}%, 기준 -${t.stopLossPct}%)`;
+        } else if (pnlPct >= t.takeProfitPct) {
+          triggered = `자동 익절 (${sideLabel}, 손익 +${pnlPct.toFixed(1)}%, 기준 +${t.takeProfitPct}%)`;
         }
         if (triggered) {
           p.cash += value;
-          p.holdings[symbol] = { qty: 0, avgPrice: h.avgPrice, margin: 0 };
+          p.holdings[symbol] = { qty: 0, avgPrice: h.avgPrice, margin: 0, side: h.side };
           savePortfolio(t.id);
           tradeLog.push({ traderId: t.id, action: 'sell', symbol, reason: triggered, auto: true, ts: Date.now() });
           saveLog();
