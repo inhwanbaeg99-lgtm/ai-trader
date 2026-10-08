@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<title>AI 가상 트레이더</title>
+<style>
+  :root {
+    --bg: #f2f4f6;
+    --panel: #ffffff;
+    --line: #e5e8eb;
+    --ink: #191f28;
+    --ink-sub: #8b95a1;
+    --up: #ff5c5c;
+    --down: #3182f6;
+    --accent: #2ecc71;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    min-height: 100dvh;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap {
+    max-width: 920px;
+    margin: 0 auto;
+    padding: 20px 16px 80px;
+  }
+  .page-title {
+    font-size: 24px;
+    font-weight: 800;
+    margin-bottom: 4px;
+  }
+  .page-sub {
+    font-size: 13px;
+    color: var(--ink-sub);
+    margin-bottom: 20px;
+  }
+  .traders-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 14px;
+  }
+  .trader-card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 16px;
+  }
+  .trader-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+  }
+  .trader-name {
+    font-size: 17px;
+    font-weight: 800;
+  }
+  .trader-badge {
+    font-size: 11px;
+    font-weight: 700;
+    padding: 3px 8px;
+    border-radius: 999px;
+    background: var(--bg);
+    color: var(--ink-sub);
+  }
+  .trader-desc {
+    font-size: 12.5px;
+    color: var(--ink-sub);
+    line-height: 1.5;
+    margin-bottom: 12px;
+    min-height: 36px;
+  }
+  .trader-balance {
+    font-size: 22px;
+    font-weight: 800;
+    margin-bottom: 2px;
+  }
+  .trader-pnl {
+    font-size: 13px;
+    font-weight: 700;
+    margin-bottom: 12px;
+  }
+  .trader-pnl.up { color: var(--up); }
+  .trader-pnl.down { color: var(--down); }
+  .trader-pnl.flat { color: var(--ink-sub); }
+  .trader-holdings {
+    border-top: 1px solid var(--line);
+    padding-top: 10px;
+    margin-bottom: 12px;
+  }
+  .holding-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12.5px;
+    padding: 3px 0;
+  }
+  .holding-row .sym { font-weight: 700; }
+  .holding-row .val { color: var(--ink-sub); }
+  .empty-holdings {
+    font-size: 12.5px;
+    color: var(--ink-sub);
+    padding: 3px 0;
+  }
+  .decide-btn {
+    width: 100%;
+    padding: 11px;
+    border: none;
+    border-radius: 10px;
+    background: var(--accent);
+    color: #04201d;
+    font-weight: 700;
+    font-size: 13.5px;
+    cursor: pointer;
+  }
+  .decide-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  .trader-status {
+    font-size: 11.5px;
+    color: var(--ink-sub);
+    margin-top: 6px;
+    min-height: 14px;
+  }
+  .section-title {
+    font-size: 14px;
+    font-weight: 800;
+    margin: 24px 0 10px;
+  }
+  .log-list {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    overflow: hidden;
+  }
+  .log-row {
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--line);
+    font-size: 12.5px;
+  }
+  .log-row:last-child { border-bottom: none; }
+  .log-top {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 4px;
+  }
+  .log-trader { font-weight: 700; }
+  .log-time { color: var(--ink-sub); }
+  .log-action { font-weight: 700; }
+  .log-action.buy { color: var(--up); }
+  .log-action.sell { color: var(--down); }
+  .log-action.hold { color: var(--ink-sub); }
+  .log-reason {
+    color: var(--ink-sub);
+    margin-top: 4px;
+    line-height: 1.5;
+  }
+  .empty-log {
+    padding: 20px;
+    text-align: center;
+    color: var(--ink-sub);
+    font-size: 13px;
+  }
+  .config-note {
+    font-size: 12px;
+    color: var(--ink-sub);
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 10px 12px;
+    margin-top: 16px;
+    line-height: 1.6;
+  }
+  .config-note code {
+    background: var(--bg);
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="page-title">AI 가상 트레이더</div>
+    <div class="page-sub" id="priceUpdatedNote">시세 불러오는 중...</div>
+
+    <div class="traders-grid" id="tradersGrid"></div>
+
+    <div class="section-title">거래 기록</div>
+    <div class="log-list" id="logList"></div>
+
+    <div class="config-note" id="configNote" style="display:none"></div>
+  </div>
+
+<script>
+  const START_BALANCE = 10000000; // 트레이더당 가상 시드머니 1천만원
+  const SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT'];
+  const FAPI = 'https://fapi.binance.com/fapi/v1';
+
+  // 백엔드(Cloudflare Worker) 엔드포인트 -- 아직 배포 전이면 비워두고,
+  // 배포 후 여기에 실제 Worker URL을 넣으면 '판단 요청' 버튼이 동작한다.
+  const DECIDE_ENDPOINT = '';
+
+  const TRADERS = [
+    {
+      id: 'A',
+      name: '트레이더 A',
+      badge: '공격형',
+      desc: '변동성이 크더라도 추세와 모멘텀을 믿고 과감하게 베팅하는 성격.',
+      persona: '너는 공격적인 단기 트레이더다. 변동성과 모멘텀을 적극적으로 추종하며, 확신이 서면 포지션을 크게 가져간다. 손절은 빠르지만 익절은 길게 끌고 간다.',
+    },
+    {
+      id: 'B',
+      name: '트레이더 B',
+      badge: '안정형',
+      desc: '리스크 관리를 최우선으로, 분산과 작은 포지션을 선호하는 성격.',
+      persona: '너는 보수적인 리스크 관리 중심 트레이더다. 한 종목에 자산의 20% 이상을 넣지 않고, 확실한 근거가 없으면 관망(hold)을 택한다. 분산 투자를 선호한다.',
+    },
+    {
+      id: 'C',
+      name: '트레이더 C',
+      badge: '역발상형',
+      desc: '시장 심리가 과열되거나 과매도일 때 역으로 움직이는 역발상 투자 성격.',
+      persona: '너는 역발상(contrarian) 투자자다. 단기 급등은 과열로, 단기 급락은 과매도 기회로 해석하는 경향이 있다. 시장 분위기에 휩쓸리지 않는다.',
+    },
+  ];
+
+  let tickers = {};
+  let portfolios = {};
+  let tradeLog = [];
+
+  function loadState() {
+    TRADERS.forEach((t) => {
+      let p;
+      try {
+        p = JSON.parse(localStorage.getItem(`aitrader_portfolio_${t.id}`));
+      } catch (e) {
+        p = null;
+      }
+      portfolios[t.id] = p || { cash: START_BALANCE, holdings: {} };
+    });
+    try {
+      tradeLog = JSON.parse(localStorage.getItem('aitrader_log') || '[]');
+    } catch (e) {
+      tradeLog = [];
+    }
+  }
+
+  function savePortfolio(id) {
+    localStorage.setItem(`aitrader_portfolio_${id}`, JSON.stringify(portfolios[id]));
+  }
+  function saveLog() {
+    localStorage.setItem('aitrader_log', JSON.stringify(tradeLog));
+  }
+
+  function fmtWon(n) {
+    return Math.round(n).toLocaleString('ko-KR') + '원';
+  }
+
+  function portfolioValue(id) {
+    const p = portfolios[id];
+    let total = p.cash;
+    Object.entries(p.holdings).forEach(([sym, qty]) => {
+      const t = tickers[sym];
+      if (t) total += qty * Number(t.lastPrice) * krwRate;
+    });
+    return total;
+  }
+
+  let krwRate = 1400; // 대략치, 실제 환율 API 붙이기 전까지 고정값
+
+  async function fetchTickers() {
+    const res = await fetch(`${FAPI}/ticker/24hr`);
+    const data = await res.json();
+    const map = {};
+    data.forEach((t) => {
+      if (SYMBOLS.includes(t.symbol)) map[t.symbol] = t;
+    });
+    tickers = map;
+  }
+
+  function renderTraders() {
+    const grid = document.getElementById('tradersGrid');
+    grid.innerHTML = TRADERS.map((t) => {
+      const p = portfolios[t.id];
+      const value = portfolioValue(t.id);
+      const pnl = value - START_BALANCE;
+      const pnlPct = (pnl / START_BALANCE) * 100;
+      const pnlCls = pnl > 0 ? 'up' : pnl < 0 ? 'down' : 'flat';
+      const holdingsHtml = Object.entries(p.holdings).filter(([, qty]) => qty > 0).length
+        ? Object.entries(p.holdings)
+            .filter(([, qty]) => qty > 0)
+            .map(([sym, qty]) => {
+              const tk = tickers[sym];
+              const val = tk ? qty * Number(tk.lastPrice) * krwRate : 0;
+              return `<div class="holding-row"><span class="sym">${sym.replace('USDT', '')}</span><span class="val">${qty.toFixed(4)} · ${fmtWon(val)}</span></div>`;
+            })
+            .join('')
+        : '<div class="empty-holdings">보유 중인 자산 없음</div>';
+      return `
+        <div class="trader-card">
+          <div class="trader-head">
+            <div class="trader-name">${t.name}</div>
+            <div class="trader-badge">${t.badge}</div>
+          </div>
+          <div class="trader-desc">${t.desc}</div>
+          <div class="trader-balance">${fmtWon(value)}</div>
+          <div class="trader-pnl ${pnlCls}">${pnl >= 0 ? '+' : ''}${fmtWon(pnl)} (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%)</div>
+          <div class="trader-holdings">${holdingsHtml}</div>
+          <button type="button" class="decide-btn" data-trader="${t.id}" ${DECIDE_ENDPOINT ? '' : 'disabled'}>
+            ${DECIDE_ENDPOINT ? '지금 판단 요청' : '백엔드 미연결'}
+          </button>
+          <div class="trader-status" id="status-${t.id}"></div>
+        </div>
+      `;
+    }).join('');
+
+    grid.querySelectorAll('.decide-btn').forEach((btn) => {
+      btn.addEventListener('click', () => requestDecision(btn.dataset.trader));
+    });
+  }
+
+  function renderLog() {
+    const logEl = document.getElementById('logList');
+    if (!tradeLog.length) {
+      logEl.innerHTML = '<div class="empty-log">아직 거래 기록이 없어요. "지금 판단 요청" 버튼을 눌러보세요.</div>';
+      return;
+    }
+    logEl.innerHTML = tradeLog
+      .slice()
+      .reverse()
+      .slice(0, 50)
+      .map((l) => {
+        const traderName = TRADERS.find((t) => t.id === l.traderId)?.name || l.traderId;
+        const time = new Date(l.ts).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+        const actionLabel = l.action === 'buy' ? '매수' : l.action === 'sell' ? '매도' : '관망';
+        return `
+          <div class="log-row">
+            <div class="log-top">
+              <span class="log-trader">${traderName} · <span class="log-action ${l.action}">${actionLabel}</span>${l.symbol ? ' ' + l.symbol.replace('USDT', '') : ''}</span>
+              <span class="log-time">${time}</span>
+            </div>
+            <div class="log-reason">${l.reason || ''}</div>
+          </div>
+        `;
+      })
+      .join('');
+  }
+
+  async function requestDecision(traderId) {
+    const trader = TRADERS.find((t) => t.id === traderId);
+    const statusEl = document.getElementById(`status-${traderId}`);
+    const btn = document.querySelector(`.decide-btn[data-trader="${traderId}"]`);
+    if (!DECIDE_ENDPOINT) {
+      statusEl.textContent = '아직 백엔드(Worker)가 연결되지 않았어요.';
+      return;
+    }
+    btn.disabled = true;
+    statusEl.textContent = '판단 요청 중...';
+    try {
+      const market = SYMBOLS.map((s) => {
+        const t = tickers[s];
+        return t ? { symbol: s, price: Number(t.lastPrice), changePercent: Number(t.priceChangePercent) } : null;
+      }).filter(Boolean);
+      const res = await fetch(DECIDE_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          persona: trader.persona,
+          portfolio: portfolios[traderId],
+          market,
+        }),
+      });
+      if (!res.ok) throw new Error('요청 실패');
+      const decision = await res.json(); // { action: 'buy'|'sell'|'hold', symbol, amountKrw, reason }
+      applyDecision(traderId, decision);
+      statusEl.textContent = '완료';
+    } catch (e) {
+      statusEl.textContent = '오류: ' + e.message;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  function applyDecision(traderId, decision) {
+    const p = portfolios[traderId];
+    const { action, symbol, amountKrw, reason } = decision;
+    if (action === 'buy' && symbol && amountKrw > 0) {
+      const t = tickers[symbol];
+      if (t && p.cash >= amountKrw) {
+        const qty = amountKrw / (Number(t.lastPrice) * krwRate);
+        p.holdings[symbol] = (p.holdings[symbol] || 0) + qty;
+        p.cash -= amountKrw;
+      }
+    } else if (action === 'sell' && symbol) {
+      const t = tickers[symbol];
+      const have = p.holdings[symbol] || 0;
+      if (t && have > 0) {
+        const sellQty = amountKrw ? Math.min(have, amountKrw / (Number(t.lastPrice) * krwRate)) : have;
+        p.holdings[symbol] = have - sellQty;
+        p.cash += sellQty * Number(t.lastPrice) * krwRate;
+      }
+    }
+    savePortfolio(traderId);
+    tradeLog.push({ traderId, action, symbol, reason, ts: Date.now() });
+    saveLog();
+    renderTraders();
+    renderLog();
+  }
+
+  async function refreshLoop() {
+    try {
+      await fetchTickers();
+      document.getElementById('priceUpdatedNote').textContent = `${new Date().toLocaleTimeString('ko-KR')} 기준 시세`;
+      renderTraders();
+    } catch (e) {
+      document.getElementById('priceUpdatedNote').textContent = '시세 로딩 실패, 재시도 중...';
+    }
+  }
+
+  function showConfigNoteIfNeeded() {
+    if (DECIDE_ENDPOINT) return;
+    const note = document.getElementById('configNote');
+    note.style.display = '';
+    note.innerHTML = `백엔드(Claude API 프록시)가 아직 연결 안 됐어요. Cloudflare Worker 배포 후 <code>index.html</code>의 <code>DECIDE_ENDPOINT</code> 값을 Worker URL로 채워주세요.`;
+  }
+
+  loadState();
+  renderTraders();
+  renderLog();
+  showConfigNoteIfNeeded();
+  refreshLoop();
+  setInterval(refreshLoop, 5000);
+</script>
+</body>
+</html>
