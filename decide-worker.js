@@ -23,7 +23,7 @@ function json(data, status = 200) {
 const START_BALANCE = 10000000; // 트레이더당 가상 시드머니 1천만원
 const SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT'];
 const KRW_RATE = 1400; // 대략치, 실제 환율 API 붙이기 전까지 고정값
-const INTERVAL_SECONDS = 60; // 판단 주기 -- 비용 대비 효율을 고려해 15초에서 1분으로 조정
+const INTERVAL_SECONDS = 120; // 판단 주기 -- 당분간 비용 아끼면서 전적 데이터부터 쌓는 단계라 2분으로 조정
 
 // 시세 소스 변천사: Binance(fapi/api 전부)·Bybit·CoinGecko는 Cloudflare
 // Workers 엣지 IP를 아예 차단(403/451/429)한다. OKX는 처음엔 됐지만 이후
