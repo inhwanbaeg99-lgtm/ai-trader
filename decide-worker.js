@@ -77,12 +77,14 @@ function defaultState() {
   const portfolios = {};
   const dailyBase = {};
   const tradeHistory = {};
+  const dailyHistory = {};
   TRADERS.forEach((t) => {
     portfolios[t.id] = { cash: START_BALANCE, holdings: {} };
     dailyBase[t.id] = null;
     tradeHistory[t.id] = [];
+    dailyHistory[t.id] = [];
   });
-  return { portfolios, dailyBase, tradeLog: [], tickers: {}, tradeHistory };
+  return { portfolios, dailyBase, tradeLog: [], tickers: {}, tradeHistory, dailyHistory };
 }
 
 // 실제 모델 파인튜닝은 아니고, 트레이더별 "청산된 거래의 실현손익" 기록을
@@ -139,14 +141,81 @@ function portfolioValue(portfolio, tickers) {
   return total;
 }
 
-function ensureDailyBaseline(state, tickers) {
-  const today = todayDateStr();
+// 그날 하루 안에서 목표를 한 번이라도 달성했는지 기록해둔다 (달성 후 포지션
+// 정리 과정에서 일시적으로 값이 흔들려도 "그날 달성"이라는 사실 자체는 유지).
+function markGoalHitToday(state, tickers) {
   TRADERS.forEach((t) => {
     const base = state.dailyBase[t.id];
-    if (!base || base.date !== today) {
-      state.dailyBase[t.id] = { date: today, value: portfolioValue(state.portfolios[t.id], tickers) };
+    if (base && !base.hitTarget && todayPct(state, t.id, tickers) >= t.dailyTargetPct) {
+      base.hitTarget = true;
     }
   });
+}
+
+async function generateDayComment(env, trader, pctReturn, hit, trades) {
+  const tradesText = trades.length
+    ? trades
+        .map((h) => `${h.symbol.replace('USDT', '')} ${h.pnl >= 0 ? '+' : ''}${Math.round(h.pnl).toLocaleString('ko-KR')}원`)
+        .join(', ')
+    : '청산된 거래 없음';
+  const prompt = `
+너는 "${trader.name}"(${trader.badge}) 트레이더의 하루 결산을 짧게 코멘트하는 역할이다.
+성격/전략: ${trader.persona}
+오늘 목표 수익률: +${trader.dailyTargetPct}%
+오늘 실제 수익률: ${pctReturn >= 0 ? '+' : ''}${pctReturn.toFixed(2)}%
+목표 달성 여부: ${hit ? '달성' : '미달성'}
+오늘 청산된 거래들(최근 순): ${tradesText}
+
+위 내용을 바탕으로 왜 목표를 달성했는지(또는 못 했는지) 1~2문장으로 자연스러운
+한국어 코멘트를 써라. "~인 것 같다"처럼 분석하는 말투로, 다른 설명이나 따옴표 없이
+코멘트 내용만 출력해라.
+`.trim();
+
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 200, messages: [{ role: 'user', content: prompt }] }),
+    });
+    if (!res.ok) throw new Error(`day comment fetch failed: ${res.status}`);
+    const data = await res.json();
+    const text = (data.content?.[0]?.text || '').trim();
+    return text || (hit ? '목표를 달성했다.' : '목표를 달성하지 못했다.');
+  } catch (e) {
+    return hit
+      ? `오늘 ${pctReturn >= 0 ? '+' : ''}${pctReturn.toFixed(2)}%로 목표를 달성한 것으로 보인다.`
+      : `오늘 ${pctReturn >= 0 ? '+' : ''}${pctReturn.toFixed(2)}%에 그쳐 목표를 채우지 못한 것으로 보인다.`;
+  }
+}
+
+async function archiveDay(env, state, trader, base, tickers) {
+  const endValue = portfolioValue(state.portfolios[trader.id], tickers);
+  const pctReturn = base.value > 0 ? ((endValue - base.value) / base.value) * 100 : 0;
+  const hit = !!base.hitTarget || pctReturn >= trader.dailyTargetPct;
+  const recentTrades = (state.tradeHistory[trader.id] || []).slice(-8);
+  const comment = await generateDayComment(env, trader, pctReturn, hit, recentTrades);
+  const hist = state.dailyHistory[trader.id] || (state.dailyHistory[trader.id] = []);
+  hist.push({ date: base.date, pctReturn: Number(pctReturn.toFixed(2)), targetPct: trader.dailyTargetPct, hit, comment });
+  if (hist.length > 60) hist.splice(0, hist.length - 60);
+}
+
+// 한국시간(KST) 자정 기준으로 날짜가 바뀌면 어제 하루치 결과를 dailyHistory에
+// 기록(성공/실패 + 이유 코멘트)하고 오늘자 기준점을 새로 잡는다.
+async function rolloverDayIfNeeded(env, state, tickers) {
+  const today = todayDateStr();
+  for (const t of TRADERS) {
+    const base = state.dailyBase[t.id];
+    if (base && base.date !== today) {
+      await archiveDay(env, state, t, base, tickers);
+    }
+    if (!base || base.date !== today) {
+      state.dailyBase[t.id] = { date: today, value: portfolioValue(state.portfolios[t.id], tickers), hitTarget: false };
+    }
+  }
 }
 
 function todayPct(state, traderId, tickers) {
@@ -418,6 +487,7 @@ function buildStateView(state, tickers) {
       holdings,
       closedTrades: perf.count,
       winRate: perf.count ? Math.round(perf.winRate) : null,
+      dailyHistory: (state.dailyHistory[t.id] || []).slice().reverse(),
     };
   });
   return {
@@ -455,6 +525,7 @@ export class TraderEngine {
       tradeLog: Array.isArray(raw.tradeLog) ? raw.tradeLog : [],
       tickers: raw.tickers || {},
       tradeHistory: { ...base.tradeHistory, ...raw.tradeHistory },
+      dailyHistory: { ...base.dailyHistory, ...raw.dailyHistory },
     };
   }
 
@@ -467,7 +538,8 @@ export class TraderEngine {
     const state = await this.loadState();
     const tickers = await fetchTickers();
     state.tickers = tickers;
-    ensureDailyBaseline(state, tickers);
+    await rolloverDayIfNeeded(this.env, state, tickers);
+    markGoalHitToday(state, tickers);
     checkStopLossAndTakeProfit(state, tickers);
     // 3명을 동시에 판단시킨다 -- 순서대로 돌리면 사이클 하나에 Claude 호출
     // 3번이 직렬로 쌓여서 짧은 주기를 맞추기 어렵다. 트레이더별로 포트폴리오가
@@ -509,7 +581,8 @@ export class TraderEngine {
       const state = await this.loadState();
       const tickers = await fetchTickers();
       state.tickers = tickers;
-      ensureDailyBaseline(state, tickers);
+      await rolloverDayIfNeeded(this.env, state, tickers);
+      markGoalHitToday(state, tickers);
       checkStopLossAndTakeProfit(state, tickers);
       const result = await runTraderDecision(this.env, state, tickers, traderId, false);
       await this.saveState(state);
@@ -527,6 +600,20 @@ export class TraderEngine {
       // 설정을 통째로 바꿨을 때, 옛 설정으로 잡힌 포지션을 들고 가지 않도록).
       await this.saveState(defaultState());
       return json({ ok: true });
+    }
+
+    if (url.pathname === '/debug/force-rollover' && request.method === 'POST') {
+      // 실제 자정을 기다리지 않고 하루 마감(rollover) 로직을 테스트하기 위한
+      // 디버그용 엔드포인트. dailyBase의 날짜만 어제로 되돌려서, 다음 사이클
+      // (또는 이 호출 직후의 /run-now)에서 진짜 rollover 경로를 타게 만든다.
+      const state = await this.loadState();
+      const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const yStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Seoul' }).format(yesterday);
+      TRADERS.forEach((t) => {
+        if (state.dailyBase[t.id]) state.dailyBase[t.id].date = yStr;
+      });
+      await this.saveState(state);
+      return json({ ok: true, setTo: yStr });
     }
 
     return json({ error: 'not found' }, 404);
