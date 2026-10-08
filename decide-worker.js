@@ -62,7 +62,43 @@ function defaultState() {
     tradeHistory[t.id] = [];
     dailyHistory[t.id] = [];
   });
-  return { portfolios, dailyBase, tradeLog: [], tickers: {}, tradeHistory, dailyHistory };
+  return { portfolios, dailyBase, tradeLog: [], tickers: {}, tradeHistory, dailyHistory, priceHistory: {} };
+}
+
+// 시세는 매 사이클 스냅샷 하나뿐이라 "지금이 추세인지"를 모델이 판단할 근거가
+// 없었다 (계속 관망만 반복하던 원인). 심볼별로 최근 체크 시점들의 가격을
+// 남겨둬서 "몇 번 연속 같은 방향으로 움직였는지"를 계산해 판단 프롬프트에
+// 같이 넘겨준다.
+const PRICE_HISTORY_LIMIT = 20;
+
+function updatePriceHistory(state, tickers) {
+  if (!state.priceHistory) state.priceHistory = {};
+  const now = Date.now();
+  SYMBOLS.forEach((sym) => {
+    const t = tickers[sym];
+    if (!t) return;
+    const hist = state.priceHistory[sym] || (state.priceHistory[sym] = []);
+    hist.push({ price: Number(t.lastPrice), ts: now });
+    if (hist.length > PRICE_HISTORY_LIMIT) hist.splice(0, hist.length - PRICE_HISTORY_LIMIT);
+  });
+}
+
+function describeTrend(state, sym) {
+  const hist = (state.priceHistory && state.priceHistory[sym]) || [];
+  if (hist.length < 2) return '데이터 쌓이는 중 (아직 추세 판단 불가)';
+  let dir = null;
+  let streak = 0;
+  for (let i = hist.length - 1; i > 0; i--) {
+    const curDir = hist[i].price >= hist[i - 1].price ? 'up' : 'down';
+    if (dir === null) { dir = curDir; streak = 1; continue; }
+    if (curDir === dir) streak++;
+    else break;
+  }
+  const first = hist[0].price;
+  const last = hist[hist.length - 1].price;
+  const pct = first > 0 ? ((last - first) / first) * 100 : 0;
+  const dirLabel = dir === 'up' ? '상승' : '하락';
+  return `최근 ${hist.length}회 체크 중 ${dirLabel} ${streak}연속, 구간 수익률 ${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
 }
 
 // 실제 모델 파인튜닝은 아니고, 트레이더별 "청산된 거래의 실현손익" 기록을
@@ -315,6 +351,12 @@ const DECISION_SCHEMA_PROMPT = `
 한 종목에 롱/숏을 동시에 가질 수는 없다 -- 이미 반대 방향 포지션이 있으면
 먼저 sell로 청산한 뒤에 방향을 바꿔라.
 
+market 데이터의 각 심볼에는 recentTrend가 같이 온다 ("최근 N회 체크 중
+하락 5연속, 구간 수익률 -2.3%" 같은 식) -- 이게 네가 찾아야 할 "추세 확인"
+신호다. 매번 "아직 명확한 추세가 아니다"라며 관망만 반복하지 마라 -- 연속
+3~4회 이상 같은 방향이면 이미 추세로 인정하고 행동해도 된다. 반대로 streak가
+1~2회뿐이고 방향이 자주 바뀐다면 아직 노이즈일 수 있으니 관망이 맞다.
+
 오늘 목표 수익률은 크지 않다(1~2% 안팎). 큰 승부를 걸어서 한 번에 채우려 하지
 말고, 확률 높은 기회를 노려서 목표를 채우는 데 집중해라. 다만 뚜렷한 추세를 타고
 있는 포지션이라면 작은 이익에 서둘러 만족하기보다 추세가 꺾일 때까지 들고 가는
@@ -394,7 +436,13 @@ async function runTraderDecision(env, state, tickers, traderId, auto) {
   }
   const market = SYMBOLS.map((s) => {
     const t = tickers[s];
-    return t ? { symbol: s, price: Number(t.lastPrice), changePercent: Number(t.priceChangePercent) } : null;
+    if (!t) return null;
+    return {
+      symbol: s,
+      price: Number(t.lastPrice),
+      changePercent: Number(t.priceChangePercent),
+      recentTrend: describeTrend(state, s),
+    };
   }).filter(Boolean);
   try {
     const decision = await callClaude(
@@ -485,6 +533,7 @@ export class TraderEngine {
       tickers: raw.tickers || {},
       tradeHistory: { ...base.tradeHistory, ...raw.tradeHistory },
       dailyHistory: { ...base.dailyHistory, ...raw.dailyHistory },
+      priceHistory: raw.priceHistory || {},
     };
   }
 
@@ -497,6 +546,7 @@ export class TraderEngine {
     const state = await this.loadState();
     const tickers = await fetchTickers();
     state.tickers = tickers;
+    updatePriceHistory(state, tickers);
     await rolloverDayIfNeeded(this.env, state, tickers);
     markGoalHitToday(state, tickers);
     checkStopLossAndTakeProfit(state, tickers);
@@ -540,6 +590,7 @@ export class TraderEngine {
       const state = await this.loadState();
       const tickers = await fetchTickers();
       state.tickers = tickers;
+      updatePriceHistory(state, tickers);
       await rolloverDayIfNeeded(this.env, state, tickers);
       markGoalHitToday(state, tickers);
       checkStopLossAndTakeProfit(state, tickers);
