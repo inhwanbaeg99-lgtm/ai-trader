@@ -96,11 +96,12 @@
   .auto-mode-toggle.on::after {
     transform: translateX(18px);
   }
-  /* 데스크탑: 기존 박스형 3열 카드(설명 포함). 모바일: 가로로 긴 얇은 1열 행. */
+  /* 트레이더 1명만 쓰므로 데스크탑도 가운데 정렬된 카드 하나로 표시. */
   .traders-grid-desktop { display: none; }
   .traders-grid-mobile { display: none; }
   @media (min-width: 601px) {
-    .traders-grid-desktop { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .traders-grid-desktop { display: flex; justify-content: center; }
+    .traders-grid-desktop .trader-card { width: 100%; max-width: 420px; }
   }
   @media (max-width: 600px) {
     .traders-grid-mobile { display: flex; flex-direction: column; gap: 8px; }
@@ -464,7 +465,7 @@
         <div class="trader-card ${t.goalHit ? 'goal-hit' : ''}" data-trader="${t.id}">
           <div class="trader-head">
             <div class="trader-name">${t.name}</div>
-            <div class="trader-badge">${t.badge}</div>
+            ${t.badge ? `<div class="trader-badge">${t.badge}</div>` : ''}
           </div>
           <div class="trader-desc">${t.desc}</div>
           ${goalBannerHtml}
@@ -503,7 +504,7 @@
           <div class="trader-main-row">
             <div class="trader-id-group">
               <span class="trader-name">${t.name}</span>
-              <span class="trader-badge">${t.badge}</span>
+              ${t.badge ? `<span class="trader-badge">${t.badge}</span>` : ''}
             </div>
             <span class="trader-balance">${fmtWon(t.value)}</span>
           </div>
@@ -559,7 +560,9 @@
     const t = latestTraders.find((x) => x.id === openTraderId);
     if (!t) return;
     document.getElementById('detailName').textContent = t.name;
-    document.getElementById('detailBadge').textContent = t.badge;
+    const detailBadgeEl = document.getElementById('detailBadge');
+    detailBadgeEl.textContent = t.badge;
+    detailBadgeEl.style.display = t.badge ? '' : 'none';
     document.getElementById('detailSub').textContent = `${t.desc} (레버리지 ${t.leverage}x, 하루 목표 +${t.dailyTargetPct}%)`;
     const dayListEl = document.getElementById('dayList');
     if (!t.dailyHistory.length) {

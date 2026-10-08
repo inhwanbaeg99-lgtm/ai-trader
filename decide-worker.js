@@ -33,43 +33,21 @@ const INTERVAL_SECONDS = 180; // 판단 주기 -- 당분간 비용 아끼면서 
 
 // 위험도(공격/안정/역발상)가 아니라 "어떤 신호에 반응하는 매매 스타일인가"로
 // 성격을 나눈다. 목표가 하루 +1%로 작아졌으니 셋 다 큰 승부를 걸 필요 없이
-// 확률 높은 작은 기회를 자주/빠르게 챙기는 쪽으로 레버리지를 낮추고
-// 손절은 노이즈에 덜 털리게 여유를 주되, 익절은 타이트하게 잡아 이익을
-// 빨리 확정 짓게 했다 (목표 달성 확률을 올리는 핵심 레버는 "작은 이익을
-// 반대로 돌아서기 전에 빨리 잠근다"는 점).
+// 여러 트레이더로 나눠서 경쟁시키던 컨셉은 걷어내고, 혼자 쓸 용도로
+// 투자에 특화된 트레이더 1명만 둔다. 특정 패턴(모멘텀/되돌림/레인지)에
+// 갇히지 않고 상황에 맞는 전략을 유연하게 골라 쓰게 한다 -- 예를 들어
+// 뚜렷한 하락 추세면 숏으로 추세를 따라가는 것도 포함.
 const TRADERS = [
   {
     id: 'A',
-    name: 'Trader A',
-    badge: '모멘텀추격형',
-    desc: '거래량이 실리는 단기 돌파 움직임을 빠르게 쫓아 들어갔다가, 조금이라도 이익이 나면 바로 실현하는 성격.',
-    persona: '너는 단기 모멘텀(거래량이 실린 뚜렷한 돌파 움직임)을 빠르게 포착해 진입하는 트레이더다. 큰 승부보다 확률 높은 작은 기회를 자주 잡는 걸 우선한다. 포지션에 조금이라도 이익이 나면 추가 상승을 욕심내지 않고 빠르게 실현해서 확정 짓는다. 모멘텀이 꺾이는 기미가 보이면 미련 두지 않고 바로 정리한다.',
-    stopLossPct: 2,
-    takeProfitPct: 3,
+    name: 'AI 트레이더',
+    badge: '',
+    desc: '모멘텀 돌파, 과열/과매도 되돌림, 레인지 매매, 추세추종까지 상황에 맞춰 유연하게 구사하는 숙련된 트레이더.',
+    persona: '너는 다양한 전략(모멘텀 돌파, 과열/과매도 되돌림, 레인지 매매, 추세추종)을 상황에 맞게 유연하게 구사하는 숙련된 트레이더다. 시장이 뚜렷한 방향성(추세)을 보이면 그 추세를 거스르지 않고 롱이든 숏이든 따라간다 -- 하락 추세가 명확하면 숏으로 베팅하는 것도 적극적으로 고려해라. 반대로 뚜렷한 방향이 없고 좁은 범위에서만 오간다면 레인지 매매로, 급등락 뒤에는 되돌림을 노리는 식으로 상황에 맞는 접근을 고른다. 큰 승부보다 확률 높은 기회를 자주 포착하는 걸 우선하되, 명확한 추세에서는 작은 이익에 서둘러 만족하기보다 추세가 꺾이는 신호가 나올 때까지 유연하게 들고 가도 된다. 리스크 관리는 항상 최우선이다.',
+    stopLossPct: 2.5,
+    takeProfitPct: 5,
     leverage: 5,
-    dailyTargetPct: 1,
-  },
-  {
-    id: 'B',
-    name: 'Trader B',
-    badge: '되돌림매매형',
-    desc: '단기 급등락 뒤에 오는 되돌림(눌림목/단기 반등)을 짧게 노려 빠르게 치고 빠지는 성격.',
-    persona: '너는 단기 과열/과매도 이후의 되돌림(눌림목 매수, 단기 반등 숏)을 짧게 노리는 트레이더다. 큰 추세를 예측하려 하지 않고, 직전 급등락 폭의 일부라도 되돌아올 확률이 높은 구간만 짧게 공략한다. 작은 수익이 나면 욕심부리지 않고 바로 실현한다.',
-    stopLossPct: 2,
-    takeProfitPct: 3,
-    leverage: 4,
-    dailyTargetPct: 1,
-  },
-  {
-    id: 'C',
-    name: 'Trader C',
-    badge: '레인지스캘퍼형',
-    desc: '최근 좁은 가격 범위 안에서 오르내리는 흐름을 짧게 왕복 매매하는 성격.',
-    persona: '너는 최근 좁은 가격 범위(레인지) 안에서 오가는 흐름을 짧게 왕복 매매하는 트레이더다. 범위 하단 근처에서 롱, 상단 근처에서 숏처럼 짧고 확률 높은 매매를 반복하며, 범위를 크게 벗어나는 변동에는 무리해서 따라가지 않는다. 작은 이익은 바로 실현한다.',
-    stopLossPct: 2,
-    takeProfitPct: 3,
-    leverage: 4,
-    dailyTargetPct: 1,
+    dailyTargetPct: 1.5,
   },
 ];
 
@@ -337,16 +315,10 @@ const DECISION_SCHEMA_PROMPT = `
 한 종목에 롱/숏을 동시에 가질 수는 없다 -- 이미 반대 방향 포지션이 있으면
 먼저 sell로 청산한 뒤에 방향을 바꿔라.
 
-오늘 목표 수익률은 크지 않다(1% 안팎). 큰 승부를 걸어서 한 번에 채우려 하지
-말고, 네 스타일에 맞는 확률 높고 작은 기회를 여러 번 노려서 목표를 채우는 데
-집중해라. 포지션에 조금이라도 이익이 나면 욕심부리지 말고 빨리 실현해서
-확정 짓는 걸 우선해라 -- 목표를 채우면 그날 매매는 자동으로 종료된다.
-
-너는 다른 트레이더들과 같은 날 같은 시장에서 경쟁 중이다. 아래에 오늘 네 수익률과
-다른 트레이더들의 오늘 수익률이 주어진다. 뒤처지고 있으면 조급함이나 만회 심리가
-생길 수 있고, 앞서고 있으면 수익을 지키고 싶은 심리가 생길 수 있다 -- 단, 이런
-경쟁심이 네 원래 성격/전략을 완전히 무너뜨리진 않아야 한다 (예: 레인지 스캘퍼라면
-뒤처져도 범위를 크게 벗어난 무리한 베팅은 하지 않는다).
+오늘 목표 수익률은 크지 않다(1~2% 안팎). 큰 승부를 걸어서 한 번에 채우려 하지
+말고, 확률 높은 기회를 노려서 목표를 채우는 데 집중해라. 다만 뚜렷한 추세를 타고
+있는 포지션이라면 작은 이익에 서둘러 만족하기보다 추세가 꺾일 때까지 들고 가는
+것도 괜찮다 -- 목표를 채우면 그날 매매는 자동으로 종료된다.
 
 아래에 네가 최근에 청산했던 거래들의 실제 손익 전적(승률/평균손익)이 요약되어
 주어진다. 이건 네 모델 자체가 학습된 게 아니라 매번 참고하라고 주는 경험
@@ -364,11 +336,7 @@ const DECISION_SCHEMA_PROMPT = `
 }
 `.trim();
 
-async function callClaude(env, persona, leverage, portfolio, market, myTodayPct, rivals, performanceSummary) {
-  const rivalsText = (rivals || [])
-    .map((r) => `- ${r.name}(${r.badge}): 오늘 ${r.todayPct >= 0 ? '+' : ''}${r.todayPct}%`)
-    .join('\n');
-
+async function callClaude(env, persona, leverage, portfolio, market, myTodayPct, performanceSummary) {
   const userContent = `
 [트레이더 성격/전략]
 ${persona}
@@ -387,9 +355,6 @@ ${JSON.stringify(market)}
 
 [오늘 내 수익률]
 ${myTodayPct >= 0 ? '+' : ''}${myTodayPct}%
-
-[다른 트레이더들의 오늘 수익률]
-${rivalsText || '(정보 없음)'}
 
 [최근 내 거래 성과 피드백]
 ${performanceSummary}
@@ -431,11 +396,6 @@ async function runTraderDecision(env, state, tickers, traderId, auto) {
     const t = tickers[s];
     return t ? { symbol: s, price: Number(t.lastPrice), changePercent: Number(t.priceChangePercent) } : null;
   }).filter(Boolean);
-  const rivals = TRADERS.filter((x) => x.id !== traderId).map((x) => ({
-    name: x.name,
-    badge: x.badge,
-    todayPct: Number(todayPct(state, x.id, tickers).toFixed(2)),
-  }));
   try {
     const decision = await callClaude(
       env,
@@ -444,7 +404,6 @@ async function runTraderDecision(env, state, tickers, traderId, auto) {
       state.portfolios[traderId],
       market,
       Number(todayPct(state, traderId, tickers).toFixed(2)),
-      rivals,
       buildPerformanceSummary(state, traderId)
     );
     applyDecision(state, traderId, { ...decision, auto }, tickers);
