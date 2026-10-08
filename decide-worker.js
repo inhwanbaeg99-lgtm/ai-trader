@@ -86,7 +86,7 @@ function defaultState() {
     portfolios[t.id] = { cash: START_BALANCE, holdings: {} };
     dailyBase[t.id] = null;
   });
-  return { portfolios, dailyBase, tradeLog: [] };
+  return { portfolios, dailyBase, tradeLog: [], tickers: {} };
 }
 
 async function loadState(env) {
@@ -97,6 +97,7 @@ async function loadState(env) {
     portfolios: { ...base.portfolios, ...raw.portfolios },
     dailyBase: { ...base.dailyBase, ...raw.dailyBase },
     tradeLog: Array.isArray(raw.tradeLog) ? raw.tradeLog : [],
+    tickers: raw.tickers || {},
   };
 }
 
@@ -152,9 +153,9 @@ function goalReached(state, traderId, tickers) {
 }
 
 async function fetchTickers() {
-  // 프론트엔드가 /state를 5초마다 폴링하는데 그때마다 OKX를 직접 때리면
-  // 금방 429(rate limit)에 걸려서 cron 사이클까지 같이 실패한다. Cloudflare
-  // 엣지 캐시에 몇 초 태워서 실제 OKX 호출 횟수를 줄인다.
+  // cron(2분)과 /decide-now에서만 호출된다 -- GET /state는 KV에 저장된
+  // 마지막 시세를 읽기만 해서 OKX를 직접 때리지 않는다 (예전엔 /state도
+  // 매번 OKX를 호출해서 5초 폴링 때문에 429에 자주 걸렸었음).
   const res = await fetch('https://www.okx.com/api/v5/market/tickers?instType=SWAP', {
     cf: { cacheTtl: 8, cacheEverything: true },
   });
@@ -368,6 +369,7 @@ async function runTraderDecision(env, state, tickers, traderId, auto) {
 async function runCycle(env, { auto }) {
   const state = await loadState(env);
   const tickers = await fetchTickers();
+  state.tickers = tickers;
   ensureDailyBaseline(state, tickers);
   checkStopLossAndTakeProfit(state, tickers);
   const results = [];
@@ -427,9 +429,12 @@ export default {
     }
 
     if (url.pathname === '/state' && request.method === 'GET') {
+      // 프론트엔드가 이걸 5초마다 폴링한다. 매번 OKX를 직접 호출하면 금방
+      // 429(rate limit)에 걸려서 cron 사이클까지 같이 실패했었다 -- 이제는
+      // cron/decide-now가 받아온 시세를 KV에 같이 저장해두고 여기선 그걸
+      // 읽기만 한다 (OKX 호출 없음).
       const state = await loadState(env);
-      const tickers = await fetchTickers();
-      return json(buildStateView(state, tickers));
+      return json(buildStateView(state, state.tickers));
     }
 
     if (url.pathname === '/decide-now' && request.method === 'POST') {
@@ -445,6 +450,7 @@ export default {
       }
       const state = await loadState(env);
       const tickers = await fetchTickers();
+      state.tickers = tickers;
       ensureDailyBaseline(state, tickers);
       checkStopLossAndTakeProfit(state, tickers);
       const result = await runTraderDecision(env, state, tickers, traderId, false);
