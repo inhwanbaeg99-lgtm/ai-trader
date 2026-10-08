@@ -230,9 +230,11 @@
     align-items: center;
     justify-content: center;
   }
-  .decide-btn svg {
+  .decide-dot {
     width: 16px;
     height: 16px;
+    border-radius: 50%;
+    background: var(--ink-sub);
   }
   .decide-btn:disabled {
     opacity: 0.5;
@@ -363,7 +365,7 @@
       const btnDisabled = t.goalHit;
       const btnLabel = t.goalHit
         ? '오늘 목표 달성 - 종료'
-        : '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg>';
+        : '<span class="decide-dot" aria-hidden="true"></span>';
       return `
         <div class="trader-card ${t.goalHit ? 'goal-hit' : ''}">
           <div class="trader-head">
