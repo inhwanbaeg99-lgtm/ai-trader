@@ -79,7 +79,7 @@
     transition: background 0.2s ease;
   }
   .auto-mode-toggle.on {
-    background: var(--accent);
+    background: #22c55e;
   }
   .auto-mode-toggle::after {
     content: '';
@@ -97,26 +97,15 @@
     transform: translateX(18px);
   }
   .traders-grid {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    display: flex;
+    flex-direction: column;
     gap: 8px;
-  }
-  @media (max-width: 600px) {
-    .traders-grid { gap: 6px; }
-    .trader-card { padding: 10px; border-radius: 12px; }
-    .trader-name { font-size: 13px; }
-    .trader-badge { font-size: 8.5px; padding: 2px 5px; }
-    .trader-desc { font-size: 9.5px; height: 43px; overflow: hidden; margin-bottom: 8px; }
-    .trader-balance { font-size: 14px; }
-    .trader-pnl { font-size: 10px; margin-bottom: 8px; }
-    .holding-row { font-size: 9.5px; }
-    .decide-btn { padding: 7px; font-size: 10.5px; }
   }
   .trader-card {
     background: var(--panel);
     border: 1px solid var(--line);
-    border-radius: 16px;
-    padding: 16px;
+    border-radius: 12px;
+    padding: 10px 14px;
     transition: box-shadow 0.4s ease, border-color 0.4s ease;
   }
   .trader-card.goal-hit {
@@ -134,27 +123,69 @@
     justify-content: space-between;
     background: var(--accent);
     color: #ffffff;
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 800;
-    padding: 6px 10px;
-    border-radius: 8px;
-    margin-bottom: 10px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    margin-bottom: 6px;
   }
-  .daily-goal-row {
-    margin-bottom: 12px;
-  }
-  .daily-goal-label {
+  .trader-main-row {
     display: flex;
+    align-items: baseline;
     justify-content: space-between;
-    font-size: 11.5px;
-    color: var(--ink-sub);
-    margin-bottom: 4px;
+    gap: 10px;
   }
+  .trader-id-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+  .trader-name {
+    font-size: 15px;
+    font-weight: 800;
+    white-space: nowrap;
+  }
+  .trader-badge {
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: var(--bg);
+    color: var(--ink-sub);
+    white-space: nowrap;
+  }
+  .trader-balance {
+    font-size: 15px;
+    font-weight: 800;
+    white-space: nowrap;
+  }
+  .trader-sub-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    margin-top: 2px;
+  }
+  .trader-goal-label {
+    font-size: 10.5px;
+    color: var(--ink-sub);
+    white-space: nowrap;
+  }
+  .trader-pnl {
+    font-size: 11.5px;
+    font-weight: 700;
+    white-space: nowrap;
+  }
+  .trader-pnl.up { color: var(--up); }
+  .trader-pnl.down { color: var(--down); }
+  .trader-pnl.flat { color: var(--ink-sub); }
   .daily-goal-bar {
-    height: 6px;
+    height: 3px;
     border-radius: 999px;
     background: var(--line);
     overflow: hidden;
+    margin-top: 6px;
   }
   .daily-goal-fill {
     height: 100%;
@@ -165,95 +196,19 @@
   .daily-goal-fill.negative {
     background: var(--down);
   }
-  .trader-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 10px;
-  }
-  .trader-name {
-    font-size: 17px;
-    font-weight: 800;
-  }
-  .trader-badge {
-    font-size: 11px;
-    font-weight: 700;
-    padding: 3px 8px;
-    border-radius: 999px;
-    background: var(--bg);
-    color: var(--ink-sub);
-  }
-  .trader-desc {
-    font-size: 12.5px;
-    color: var(--ink-sub);
-    line-height: 1.5;
-    margin-bottom: 12px;
-    height: 57px;
-    overflow: hidden;
-  }
-  .trader-balance {
-    font-size: 22px;
-    font-weight: 800;
-    margin-bottom: 2px;
-  }
-  .trader-pnl {
-    font-size: 13px;
-    font-weight: 700;
-    margin-bottom: 12px;
-  }
-  .trader-pnl.up { color: var(--up); }
-  .trader-pnl.down { color: var(--down); }
-  .trader-pnl.flat { color: var(--ink-sub); }
   .trader-holdings {
-    border-top: 1px solid var(--line);
-    padding-top: 10px;
-    margin-bottom: 12px;
+    margin-top: 6px;
   }
   .holding-row {
     display: flex;
     justify-content: space-between;
-    font-size: 12.5px;
-    padding: 3px 0;
+    font-size: 11px;
+    padding: 1px 0;
   }
   .holding-row .sym { font-weight: 700; }
   .holding-row .val { color: var(--ink-sub); }
   .holding-row .val .up { color: var(--up); }
   .holding-row .val .down { color: var(--down); }
-  .empty-holdings {
-    font-size: 12.5px;
-    color: var(--ink-sub);
-    padding: 3px 0;
-  }
-  .decide-btn {
-    width: 100%;
-    padding: 11px;
-    border: none;
-    border-radius: 10px;
-    background: var(--accent);
-    color: var(--ink-sub);
-    font-weight: 700;
-    font-size: 13.5px;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-  .decide-dot {
-    width: 11px;
-    height: 11px;
-    border-radius: 50%;
-    background: var(--ink-sub);
-  }
-  .decide-btn:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
-  .trader-status {
-    font-size: 11.5px;
-    color: var(--ink-sub);
-    margin-top: 6px;
-    min-height: 14px;
-  }
   .section-title {
     font-size: 14px;
     font-weight: 800;
@@ -334,8 +289,7 @@
 
 <script>
   // 매매 로직/상태는 전부 Cloudflare Worker(+KV)에 있다. 이 페이지는 서버
-  // 상태를 주기적으로 읽어와 보여주기만 하는 뷰어이고, "지금 판단 요청"
-  // 버튼만 서버에 즉시 1회 판단을 요청하는 용도다. 서버 Cron이 2분마다
+  // 상태를 주기적으로 읽어와 보여주기만 하는 뷰어다. 서버 Cron이 2분마다
   // 알아서 A/B/C를 순서대로 판단시키므로 브라우저를 닫아도 매매는 계속된다.
   const WORKER_BASE = 'https://ai-trader-decide.inhwanbaeg99.workers.dev';
 
@@ -352,57 +306,43 @@
     grid.innerHTML = latestTraders.map((t) => {
       const pnlCls = t.pnl > 0 ? 'up' : t.pnl < 0 ? 'down' : 'flat';
       const holdingsHtml = t.holdings.length
-        ? t.holdings
+        ? `<div class="trader-holdings">${t.holdings
             .map((h) => {
               const sideLabel = h.side === 'short' ? '숏' : '롱';
               const changeCls = h.pnlPct > 0 ? 'up' : h.pnlPct < 0 ? 'down' : '';
               return `<div class="holding-row"><span class="sym">${h.symbol.replace('USDT', '')} ${sideLabel} ${t.leverage}x</span><span class="val">${fmtWon(h.value)} <span class="${changeCls}">(${h.pnlPct >= 0 ? '+' : ''}${h.pnlPct.toFixed(1)}%)</span></span></div>`;
             })
-            .join('')
-        : '<div class="empty-holdings">보유 중인 자산 없음</div>';
+            .join('')}</div>`
+        : '';
       const goalRatio = Math.min(1, Math.abs(t.todayPct) / t.dailyTargetPct);
       const goalBannerHtml = t.goalHit
         ? `<div class="goal-banner">🎯 오늘 목표 달성! +${t.todayPct.toFixed(1)}% (오늘은 매매 종료)</div>`
         : '';
-      const dailyGoalHtml = `
-        <div class="daily-goal-row">
-          <div class="daily-goal-label"><span>오늘 ${t.todayPct >= 0 ? '+' : ''}${t.todayPct.toFixed(1)}%</span><span>목표 +${t.dailyTargetPct}%</span></div>
-          <div class="daily-goal-bar"><div class="daily-goal-fill ${t.todayPct < 0 ? 'negative' : ''}" style="width:${goalRatio * 100}%"></div></div>
-        </div>
-      `;
-      const btnDisabled = t.goalHit;
-      const btnLabel = t.goalHit
-        ? '오늘 목표 달성 - 종료'
-        : '<span class="decide-dot" aria-hidden="true"></span>';
       return `
         <div class="trader-card ${t.goalHit ? 'goal-hit' : ''}">
-          <div class="trader-head">
-            <div class="trader-name">${t.name}</div>
-            <div class="trader-badge">${t.badge}</div>
-          </div>
-          <div class="trader-desc">${t.desc}</div>
           ${goalBannerHtml}
-          <div class="trader-balance">${fmtWon(t.value)}</div>
-          <div class="trader-pnl ${pnlCls}">${t.pnl >= 0 ? '+' : ''}${fmtWon(t.pnl)} (${t.pnlPct >= 0 ? '+' : ''}${t.pnlPct.toFixed(2)}%)</div>
-          ${dailyGoalHtml}
-          <div class="trader-holdings">${holdingsHtml}</div>
-          <button type="button" class="decide-btn" data-trader="${t.id}" title="지금 판단 요청" aria-label="지금 판단 요청" ${btnDisabled ? 'disabled' : ''}>
-            ${btnLabel}
-          </button>
-          <div class="trader-status" id="status-${t.id}"></div>
+          <div class="trader-main-row">
+            <div class="trader-id-group">
+              <span class="trader-name">${t.name}</span>
+              <span class="trader-badge">${t.badge}</span>
+            </div>
+            <span class="trader-balance">${fmtWon(t.value)}</span>
+          </div>
+          <div class="trader-sub-row">
+            <span class="trader-goal-label">오늘 ${t.todayPct >= 0 ? '+' : ''}${t.todayPct.toFixed(1)}% / 목표 +${t.dailyTargetPct}%</span>
+            <span class="trader-pnl ${pnlCls}">${t.pnl >= 0 ? '+' : ''}${fmtWon(t.pnl)} (${t.pnlPct >= 0 ? '+' : ''}${t.pnlPct.toFixed(2)}%)</span>
+          </div>
+          <div class="daily-goal-bar"><div class="daily-goal-fill ${t.todayPct < 0 ? 'negative' : ''}" style="width:${goalRatio * 100}%"></div></div>
+          ${holdingsHtml}
         </div>
       `;
     }).join('');
-
-    grid.querySelectorAll('.decide-btn').forEach((btn) => {
-      btn.addEventListener('click', () => requestDecision(btn.dataset.trader));
-    });
   }
 
   function renderLog() {
     const logEl = document.getElementById('logList');
     if (!latestLog.length) {
-      logEl.innerHTML = '<div class="empty-log">아직 거래 기록이 없어요. "지금 판단 요청" 버튼을 눌러보세요.</div>';
+      logEl.innerHTML = '<div class="empty-log">아직 거래 기록이 없어요. 서버가 2분마다 자동으로 판단해요.</div>';
       return;
     }
     logEl.innerHTML = latestLog
@@ -430,32 +370,6 @@
     view.traders.forEach((t) => { traderMeta[t.id] = { name: t.name }; });
     renderTraders();
     renderLog();
-  }
-
-  async function requestDecision(traderId) {
-    const statusEl = document.getElementById(`status-${traderId}`);
-    const btn = document.querySelector(`.decide-btn[data-trader="${traderId}"]`);
-    btn.disabled = true;
-    statusEl.textContent = '판단 요청 중...';
-    try {
-      const res = await fetch(`${WORKER_BASE}/decide-now`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ traderId }),
-      });
-      if (!res.ok) throw new Error('요청 실패');
-      const data = await res.json();
-      applyView(data.view);
-      statusEl.textContent = data.result.skipped
-        ? '오늘 목표 달성해서 매매 종료됐어요.'
-        : data.result.error
-        ? '오류: ' + data.result.error
-        : '완료';
-    } catch (e) {
-      statusEl.textContent = '오류: ' + e.message;
-    } finally {
-      btn.disabled = false;
-    }
   }
 
   async function refreshLoop() {
