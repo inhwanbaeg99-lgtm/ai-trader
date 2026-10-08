@@ -152,7 +152,12 @@ function goalReached(state, traderId, tickers) {
 }
 
 async function fetchTickers() {
-  const res = await fetch('https://www.okx.com/api/v5/market/tickers?instType=SWAP');
+  // 프론트엔드가 /state를 5초마다 폴링하는데 그때마다 OKX를 직접 때리면
+  // 금방 429(rate limit)에 걸려서 cron 사이클까지 같이 실패한다. Cloudflare
+  // 엣지 캐시에 몇 초 태워서 실제 OKX 호출 횟수를 줄인다.
+  const res = await fetch('https://www.okx.com/api/v5/market/tickers?instType=SWAP', {
+    cf: { cacheTtl: 8, cacheEverything: true },
+  });
   if (!res.ok) throw new Error(`OKX ticker fetch failed: ${res.status}`);
   const data = await res.json();
   const byInstId = {};
