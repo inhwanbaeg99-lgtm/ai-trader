@@ -337,11 +337,11 @@
   .detail-back {
     background: none;
     border: none;
-    color: var(--ink-sub);
-    font-size: 13px;
-    font-weight: 700;
-    padding: 6px 0;
-    margin-bottom: 14px;
+    color: var(--ink);
+    font-size: 28px;
+    line-height: 1;
+    padding: 0 4px 0 0;
+    margin-right: 2px;
     cursor: pointer;
   }
   .detail-head {
@@ -385,13 +385,10 @@
   .day-pct { font-size: 12.5px; color: var(--ink-sub); margin-bottom: 6px; }
   .day-comment { font-size: 12.5px; color: var(--ink); line-height: 1.5; }
   .empty-day-list {
-    padding: 24px;
+    padding: 20px;
     text-align: center;
     color: var(--ink-sub);
     font-size: 13px;
-    background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: 12px;
   }
 </style>
 </head>
@@ -402,7 +399,7 @@
 
     <div class="auto-mode-row">
       <div>
-        <div class="auto-mode-label">자동 매매 (서버에서 2분마다)</div>
+        <div class="auto-mode-label">자동 매매</div>
         <div class="auto-mode-sub" id="autoModeSub">항상 켜짐 - 브라우저를 닫아도 서버가 계속 매매해요</div>
       </div>
       <button type="button" class="auto-mode-toggle on" id="autoModeToggle" aria-label="서버에서 항상 자동 매매 중" disabled></button>
@@ -419,13 +416,13 @@
     </div>
 
     <div id="detailView" style="display:none">
-      <button type="button" class="detail-back" id="detailBack">← 목록으로</button>
       <div class="detail-head">
+        <button type="button" class="detail-back" id="detailBack" aria-label="목록으로">‹</button>
         <div class="trader-name" id="detailName"></div>
         <div class="trader-badge" id="detailBadge"></div>
       </div>
       <div class="detail-sub" id="detailSub"></div>
-      <div class="section-title">일별 목표 달성 기록 (KST 자정 기준)</div>
+      <div class="section-title">달성 기록 (KST 자정 기준)</div>
       <div class="day-list" id="dayList"></div>
     </div>
   </div>
@@ -522,7 +519,7 @@
   function renderLog() {
     const logEl = document.getElementById('logList');
     if (!latestLog.length) {
-      logEl.innerHTML = '<div class="empty-log">아직 거래 기록이 없어요. 서버가 2분마다 자동으로 판단해요.</div>';
+      logEl.innerHTML = '<div class="empty-log">아직 거래 기록이 없어요. 서버가 자동으로 판단해요.</div>';
       return;
     }
     logEl.innerHTML = latestLog
@@ -563,7 +560,7 @@
     const detailBadgeEl = document.getElementById('detailBadge');
     detailBadgeEl.textContent = t.badge;
     detailBadgeEl.style.display = t.badge ? '' : 'none';
-    document.getElementById('detailSub').textContent = `${t.desc} (레버리지 ${t.leverage}x, 하루 목표 +${t.dailyTargetPct}%)`;
+    document.getElementById('detailSub').textContent = t.desc;
     const dayListEl = document.getElementById('dayList');
     if (!t.dailyHistory.length) {
       dayListEl.innerHTML = '<div class="empty-day-list">아직 마감된 날이 없어요. 한국시간 자정이 지나면 그날 기록이 여기 쌓여요.</div>';
@@ -610,7 +607,7 @@
       if (!res.ok) throw new Error('상태 조회 실패');
       const view = await res.json();
       applyView(view);
-      document.getElementById('priceUpdatedNote').textContent = `${new Date(view.serverTime).toLocaleTimeString('ko-KR')} 기준 (서버 자동매매 2분마다 실행 중)`;
+      document.getElementById('priceUpdatedNote').textContent = `${new Date(view.serverTime).toLocaleTimeString('ko-KR')} 기준`;
     } catch (e) {
       document.getElementById('priceUpdatedNote').textContent = '서버 상태 로딩 실패, 재시도 중...';
     }
