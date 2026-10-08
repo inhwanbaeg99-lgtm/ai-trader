@@ -1,12 +1,11 @@
 // AI 가상 트레이더용 Cloudflare Worker --
-// 더 이상 "판단만 해주는 프록시"가 아니라, 포트폴리오 상태(KV)와 매매 로직
-// 전체를 서버에서 들고 있는 백엔드다. Cron Trigger가 주기적으로 깨워서
-// 시세 확인 -> 손절/익절 체크 -> Claude 판단 -> 체결 을 전부 서버에서 돌리므로
-// 브라우저를 닫아도 거래가 계속된다. 프론트엔드(index.html)는 /state를
-// 읽어서 보여주기만 하는 뷰어 + "지금 판단 요청" 수동 버튼 역할만 한다.
+// 상태/루프를 전부 Durable Object(TraderEngine) 하나가 들고 있다. DO의
+// Alarm이 스스로를 계속 재예약하면서 15초마다 시세 확인 -> 손절/익절 체크
+// -> Claude 판단(3명 동시) -> 체결을 돌린다. Cron Trigger(최소 1분 단위)로는
+// 이 주기를 못 맞춰서 DO+Alarm으로 옮겼다 (Workers 유료 플랜 필요).
+// 바깥쪽 fetch()는 그냥 이 DO로 요청을 그대로 넘겨주는 얇은 라우터다.
 //
 // 배포 후 `wrangler secret put ANTHROPIC_API_KEY`로 키를 등록해야 동작한다.
-// 상태 저장용 KV 바인딩(AI_TRADER_STATE)은 wrangler.toml에 이미 연결돼 있다.
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -24,7 +23,7 @@ function json(data, status = 200) {
 const START_BALANCE = 10000000; // 트레이더당 가상 시드머니 1천만원
 const SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT'];
 const KRW_RATE = 1400; // 대략치, 실제 환율 API 붙이기 전까지 고정값
-const STATE_KEY = 'state';
+const INTERVAL_SECONDS = 15; // 판단 주기 -- 사이클 처리 시간(수 초)이 더해지니 실제 간격은 이보다 조금 길다
 
 // 시세 소스 변천사: Binance(fapi/api 전부)·Bybit·CoinGecko는 Cloudflare
 // Workers 엣지 IP를 아예 차단(403/451/429)한다. OKX는 처음엔 됐지만 이후
@@ -84,23 +83,6 @@ function defaultState() {
   return { portfolios, dailyBase, tradeLog: [], tickers: {} };
 }
 
-async function loadState(env) {
-  const raw = await env.AI_TRADER_STATE.get(STATE_KEY, 'json');
-  const base = defaultState();
-  if (!raw) return base;
-  return {
-    portfolios: { ...base.portfolios, ...raw.portfolios },
-    dailyBase: { ...base.dailyBase, ...raw.dailyBase },
-    tradeLog: Array.isArray(raw.tradeLog) ? raw.tradeLog : [],
-    tickers: raw.tickers || {},
-  };
-}
-
-async function saveState(env, state) {
-  const trimmed = { ...state, tradeLog: state.tradeLog.slice(-200) };
-  await env.AI_TRADER_STATE.put(STATE_KEY, JSON.stringify(trimmed));
-}
-
 // 원래 프론트엔드가 브라우저 로컬 타임존(한국 사용자 기준 KST) 자정에
 // 하루 기준점을 리셋하던 것과 동일하게 맞추기 위해 타임존을 명시한다.
 // (Workers 런타임의 기본 "로컬" 타임존은 UTC라서 명시 안 하면 기준이 9시간 밀린다.)
@@ -148,9 +130,8 @@ function goalReached(state, traderId, tickers) {
 }
 
 async function fetchTickers() {
-  // cron(2분)과 /decide-now에서만 호출된다 -- GET /state는 KV에 저장된
-  // 마지막 시세를 읽기만 해서 외부 API를 직접 때리지 않는다 (예전엔
-  // /state도 매번 호출해서 5초 폴링 때문에 429에 자주 걸렸었음).
+  // 알람 루프와 /decide-now에서만 호출된다 -- GET /state는 저장된 마지막
+  // 시세를 읽기만 해서 외부 API를 직접 때리지 않는다.
   const res = await fetch('https://api.mexc.com/api/v3/ticker/24hr', {
     cf: { cacheTtl: 8, cacheEverything: true },
   });
@@ -359,20 +340,6 @@ async function runTraderDecision(env, state, tickers, traderId, auto) {
   }
 }
 
-async function runCycle(env, { auto }) {
-  const state = await loadState(env);
-  const tickers = await fetchTickers();
-  state.tickers = tickers;
-  ensureDailyBaseline(state, tickers);
-  checkStopLossAndTakeProfit(state, tickers);
-  const results = [];
-  for (const t of TRADERS) {
-    results.push(await runTraderDecision(env, state, tickers, t.id, auto));
-  }
-  await saveState(env, state);
-  return { state, tickers, results };
-}
-
 function buildStateView(state, tickers) {
   const traders = TRADERS.map((t) => {
     const p = state.portfolios[t.id];
@@ -408,25 +375,73 @@ function buildStateView(state, tickers) {
     serverTime: Date.now(),
     krwRate: KRW_RATE,
     startBalance: START_BALANCE,
+    intervalSeconds: INTERVAL_SECONDS,
     traders,
     tradeLog: state.tradeLog.slice(-50).reverse(),
   };
 }
 
-export default {
-  async fetch(request, env) {
+export class TraderEngine {
+  constructor(ctx, env) {
+    this.ctx = ctx;
+    this.storage = ctx.storage;
+    this.env = env;
+    // DO가 처음 깨어났거나 알람 체인이 끊겼을 때를 대비해, 예약된 알람이
+    // 없으면 즉시(지금) 하나 잡아서 루프를 시작시킨다.
+    this.ctx.blockConcurrencyWhile(async () => {
+      const existing = await this.storage.getAlarm();
+      if (existing === null) {
+        await this.storage.setAlarm(Date.now());
+      }
+    });
+  }
+
+  async loadState() {
+    const raw = await this.storage.get('state');
+    const base = defaultState();
+    if (!raw) return base;
+    return {
+      portfolios: { ...base.portfolios, ...raw.portfolios },
+      dailyBase: { ...base.dailyBase, ...raw.dailyBase },
+      tradeLog: Array.isArray(raw.tradeLog) ? raw.tradeLog : [],
+      tickers: raw.tickers || {},
+    };
+  }
+
+  async saveState(state) {
+    const trimmed = { ...state, tradeLog: state.tradeLog.slice(-200) };
+    await this.storage.put('state', trimmed);
+  }
+
+  async runCycle(auto) {
+    const state = await this.loadState();
+    const tickers = await fetchTickers();
+    state.tickers = tickers;
+    ensureDailyBaseline(state, tickers);
+    checkStopLossAndTakeProfit(state, tickers);
+    // 3명을 동시에 판단시킨다 -- 순서대로 돌리면 사이클 하나에 Claude 호출
+    // 3번이 직렬로 쌓여서 짧은 주기를 맞추기 어렵다. 트레이더별로 포트폴리오가
+    // 분리돼 있어 동시 실행해도 서로의 state를 침범하지 않는다.
+    const results = await Promise.all(
+      TRADERS.map((t) => runTraderDecision(this.env, state, tickers, t.id, auto))
+    );
+    await this.saveState(state);
+    return { state, tickers, results };
+  }
+
+  async alarm() {
+    try {
+      await this.runCycle(true);
+    } finally {
+      await this.storage.setAlarm(Date.now() + INTERVAL_SECONDS * 1000);
+    }
+  }
+
+  async fetch(request) {
     const url = new URL(request.url);
 
-    if (request.method === 'OPTIONS') {
-      return new Response(null, { headers: CORS_HEADERS });
-    }
-
     if (url.pathname === '/state' && request.method === 'GET') {
-      // 프론트엔드가 이걸 5초마다 폴링한다. 매번 OKX를 직접 호출하면 금방
-      // 429(rate limit)에 걸려서 cron 사이클까지 같이 실패했었다 -- 이제는
-      // cron/decide-now가 받아온 시세를 KV에 같이 저장해두고 여기선 그걸
-      // 읽기만 한다 (OKX 호출 없음).
-      const state = await loadState(env);
+      const state = await this.loadState();
       return json(buildStateView(state, state.tickers));
     }
 
@@ -441,33 +456,40 @@ export default {
       if (!TRADERS.find((t) => t.id === traderId)) {
         return json({ error: 'traderId가 올바르지 않습니다' }, 400);
       }
-      const state = await loadState(env);
+      const state = await this.loadState();
       const tickers = await fetchTickers();
       state.tickers = tickers;
       ensureDailyBaseline(state, tickers);
       checkStopLossAndTakeProfit(state, tickers);
-      const result = await runTraderDecision(env, state, tickers, traderId, false);
-      await saveState(env, state);
+      const result = await runTraderDecision(this.env, state, tickers, traderId, false);
+      await this.saveState(state);
       return json({ result, view: buildStateView(state, tickers) });
     }
 
     if (url.pathname === '/run-now') {
-      // Cron을 기다리지 않고 수동으로 한 사이클을 돌려보기 위한 테스트용 엔드포인트.
-      const { state, tickers, results } = await runCycle(env, { auto: true });
+      // 알람을 기다리지 않고 수동으로 한 사이클을 돌려보기 위한 테스트용 엔드포인트.
+      const { state, tickers, results } = await this.runCycle(true);
       return json({ results, view: buildStateView(state, tickers) });
     }
 
     if (url.pathname === '/reset' && request.method === 'POST') {
       // 전원 시드머니/포지션/로그를 초기화한다 (예: 트레이더 성격이나 레버리지
       // 설정을 통째로 바꿨을 때, 옛 설정으로 잡힌 포지션을 들고 가지 않도록).
-      await saveState(env, defaultState());
+      await this.saveState(defaultState());
       return json({ ok: true });
     }
 
     return json({ error: 'not found' }, 404);
-  },
+  }
+}
 
-  async scheduled(event, env, ctx) {
-    ctx.waitUntil(runCycle(env, { auto: true }));
+export default {
+  async fetch(request, env) {
+    if (request.method === 'OPTIONS') {
+      return new Response(null, { headers: CORS_HEADERS });
+    }
+    const id = env.TRADER_ENGINE.idFromName('global');
+    const stub = env.TRADER_ENGINE.get(id);
+    return stub.fetch(request);
   },
 };
