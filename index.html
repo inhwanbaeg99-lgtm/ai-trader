@@ -96,16 +96,19 @@
   .auto-mode-toggle.on::after {
     transform: translateX(18px);
   }
-  .traders-grid {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
+  /* 데스크탑: 기존 박스형 3열 카드(설명 포함). 모바일: 가로로 긴 얇은 1열 행. */
+  .traders-grid-desktop { display: none; }
+  .traders-grid-mobile { display: none; }
+  @media (min-width: 601px) {
+    .traders-grid-desktop { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
   }
+  @media (max-width: 600px) {
+    .traders-grid-mobile { display: flex; flex-direction: column; gap: 8px; }
+  }
+
   .trader-card {
     background: var(--panel);
     border: 1px solid var(--line);
-    border-radius: 12px;
-    padding: 10px 14px;
     transition: box-shadow 0.4s ease, border-color 0.4s ease;
   }
   .trader-card.goal-hit {
@@ -123,30 +126,111 @@
     justify-content: space-between;
     background: var(--accent);
     color: #ffffff;
-    font-size: 11px;
     font-weight: 800;
-    padding: 4px 8px;
     border-radius: 6px;
-    margin-bottom: 6px;
   }
-  .trader-main-row {
+  /* 거래기록의 "자동" 태그 등 카드 밖에서도 쓰이는 기본 배지 스타일 */
+  .trader-badge {
+    font-size: 11px;
+    font-weight: 700;
+    padding: 3px 8px;
+    border-radius: 999px;
+    background: var(--bg);
+    color: var(--ink-sub);
+    white-space: nowrap;
+  }
+
+  /* --- 데스크탑 박스 카드 --- */
+  .traders-grid-desktop .trader-card { padding: 16px; border-radius: 16px; }
+  .traders-grid-desktop .goal-banner { font-size: 12px; padding: 6px 10px; margin-bottom: 10px; }
+  .traders-grid-desktop .trader-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+  }
+  .traders-grid-desktop .trader-name { font-size: 17px; font-weight: 800; }
+  .traders-grid-desktop .trader-desc {
+    font-size: 12.5px;
+    color: var(--ink-sub);
+    line-height: 1.5;
+    margin-bottom: 12px;
+    height: 57px;
+    overflow: hidden;
+  }
+  .traders-grid-desktop .trader-balance {
+    font-size: 22px;
+    font-weight: 800;
+    margin-bottom: 2px;
+    display: block;
+  }
+  .traders-grid-desktop .trader-pnl {
+    font-size: 13px;
+    font-weight: 700;
+    margin-bottom: 12px;
+    display: block;
+  }
+  .traders-grid-desktop .trader-pnl.up { color: var(--up); }
+  .traders-grid-desktop .trader-pnl.down { color: var(--down); }
+  .traders-grid-desktop .trader-pnl.flat { color: var(--ink-sub); }
+  .traders-grid-desktop .daily-goal-row { margin-bottom: 12px; }
+  .traders-grid-desktop .daily-goal-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11.5px;
+    color: var(--ink-sub);
+    margin-bottom: 4px;
+  }
+  .traders-grid-desktop .daily-goal-bar {
+    height: 6px;
+    border-radius: 999px;
+    background: var(--line);
+    overflow: hidden;
+  }
+  .traders-grid-desktop .daily-goal-fill {
+    height: 100%;
+    border-radius: 999px;
+    background: var(--accent);
+    transition: width 0.4s ease;
+  }
+  .traders-grid-desktop .daily-goal-fill.negative { background: var(--down); }
+  .traders-grid-desktop .trader-holdings {
+    border-top: 1px solid var(--line);
+    padding-top: 10px;
+  }
+  .traders-grid-desktop .holding-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12.5px;
+    padding: 3px 0;
+  }
+  .traders-grid-desktop .holding-row .sym { font-weight: 700; }
+  .traders-grid-desktop .holding-row .val { color: var(--ink-sub); }
+  .traders-grid-desktop .holding-row .val .up { color: var(--up); }
+  .traders-grid-desktop .holding-row .val .down { color: var(--down); }
+  .traders-grid-desktop .empty-holdings {
+    font-size: 12.5px;
+    color: var(--ink-sub);
+    padding: 3px 0;
+  }
+
+  /* --- 모바일 얇은 행 카드 --- */
+  .traders-grid-mobile .trader-card { padding: 10px 14px; border-radius: 12px; }
+  .traders-grid-mobile .goal-banner { font-size: 11px; padding: 4px 8px; margin-bottom: 6px; }
+  .traders-grid-mobile .trader-main-row {
     display: flex;
     align-items: baseline;
     justify-content: space-between;
     gap: 10px;
   }
-  .trader-id-group {
+  .traders-grid-mobile .trader-id-group {
     display: flex;
     align-items: center;
     gap: 6px;
     min-width: 0;
   }
-  .trader-name {
-    font-size: 15px;
-    font-weight: 800;
-    white-space: nowrap;
-  }
-  .trader-badge {
+  .traders-grid-mobile .trader-name { font-size: 15px; font-weight: 800; white-space: nowrap; }
+  .traders-grid-mobile .trader-badge {
     font-size: 10px;
     font-weight: 700;
     padding: 2px 7px;
@@ -155,60 +239,44 @@
     color: var(--ink-sub);
     white-space: nowrap;
   }
-  .trader-balance {
-    font-size: 15px;
-    font-weight: 800;
-    white-space: nowrap;
-  }
-  .trader-sub-row {
+  .traders-grid-mobile .trader-balance { font-size: 15px; font-weight: 800; white-space: nowrap; }
+  .traders-grid-mobile .trader-sub-row {
     display: flex;
     align-items: baseline;
     justify-content: space-between;
     gap: 10px;
     margin-top: 2px;
   }
-  .trader-goal-label {
-    font-size: 10.5px;
-    color: var(--ink-sub);
-    white-space: nowrap;
-  }
-  .trader-pnl {
-    font-size: 11.5px;
-    font-weight: 700;
-    white-space: nowrap;
-  }
-  .trader-pnl.up { color: var(--up); }
-  .trader-pnl.down { color: var(--down); }
-  .trader-pnl.flat { color: var(--ink-sub); }
-  .daily-goal-bar {
+  .traders-grid-mobile .trader-goal-label { font-size: 10.5px; color: var(--ink-sub); white-space: nowrap; }
+  .traders-grid-mobile .trader-pnl { font-size: 11.5px; font-weight: 700; white-space: nowrap; }
+  .traders-grid-mobile .trader-pnl.up { color: var(--up); }
+  .traders-grid-mobile .trader-pnl.down { color: var(--down); }
+  .traders-grid-mobile .trader-pnl.flat { color: var(--ink-sub); }
+  .traders-grid-mobile .daily-goal-bar {
     height: 3px;
     border-radius: 999px;
     background: var(--line);
     overflow: hidden;
     margin-top: 6px;
   }
-  .daily-goal-fill {
+  .traders-grid-mobile .daily-goal-fill {
     height: 100%;
     border-radius: 999px;
     background: var(--accent);
     transition: width 0.4s ease;
   }
-  .daily-goal-fill.negative {
-    background: var(--down);
-  }
-  .trader-holdings {
-    margin-top: 6px;
-  }
-  .holding-row {
+  .traders-grid-mobile .daily-goal-fill.negative { background: var(--down); }
+  .traders-grid-mobile .trader-holdings { margin-top: 6px; }
+  .traders-grid-mobile .holding-row {
     display: flex;
     justify-content: space-between;
     font-size: 11px;
     padding: 1px 0;
   }
-  .holding-row .sym { font-weight: 700; }
-  .holding-row .val { color: var(--ink-sub); }
-  .holding-row .val .up { color: var(--up); }
-  .holding-row .val .down { color: var(--down); }
+  .traders-grid-mobile .holding-row .sym { font-weight: 700; }
+  .traders-grid-mobile .holding-row .val { color: var(--ink-sub); }
+  .traders-grid-mobile .holding-row .val .up { color: var(--up); }
+  .traders-grid-mobile .holding-row .val .down { color: var(--down); }
   .section-title {
     font-size: 14px;
     font-weight: 800;
@@ -279,7 +347,8 @@
       <button type="button" class="auto-mode-toggle on" id="autoModeToggle" aria-label="서버에서 항상 자동 매매 중" disabled></button>
     </div>
 
-    <div class="traders-grid" id="tradersGrid"></div>
+    <div class="traders-grid-desktop" id="tradersGridDesktop"></div>
+    <div class="traders-grid-mobile" id="tradersGridMobile"></div>
 
     <div class="section-title">거래 기록</div>
     <div class="log-list" id="logList"></div>
@@ -301,8 +370,45 @@
     return Math.round(n).toLocaleString('ko-KR') + '원';
   }
 
-  function renderTraders() {
-    const grid = document.getElementById('tradersGrid');
+  function renderTradersDesktop() {
+    const grid = document.getElementById('tradersGridDesktop');
+    grid.innerHTML = latestTraders.map((t) => {
+      const pnlCls = t.pnl > 0 ? 'up' : t.pnl < 0 ? 'down' : 'flat';
+      const holdingsHtml = t.holdings.length
+        ? t.holdings
+            .map((h) => {
+              const sideLabel = h.side === 'short' ? '숏' : '롱';
+              const changeCls = h.pnlPct > 0 ? 'up' : h.pnlPct < 0 ? 'down' : '';
+              return `<div class="holding-row"><span class="sym">${h.symbol.replace('USDT', '')} ${sideLabel} ${t.leverage}x</span><span class="val">${fmtWon(h.value)} <span class="${changeCls}">(${h.pnlPct >= 0 ? '+' : ''}${h.pnlPct.toFixed(1)}%)</span></span></div>`;
+            })
+            .join('')
+        : '<div class="empty-holdings">보유 중인 자산 없음</div>';
+      const goalRatio = Math.min(1, Math.abs(t.todayPct) / t.dailyTargetPct);
+      const goalBannerHtml = t.goalHit
+        ? `<div class="goal-banner">🎯 오늘 목표 달성! +${t.todayPct.toFixed(1)}% (오늘은 매매 종료)</div>`
+        : '';
+      return `
+        <div class="trader-card ${t.goalHit ? 'goal-hit' : ''}">
+          <div class="trader-head">
+            <div class="trader-name">${t.name}</div>
+            <div class="trader-badge">${t.badge}</div>
+          </div>
+          <div class="trader-desc">${t.desc}</div>
+          ${goalBannerHtml}
+          <span class="trader-balance">${fmtWon(t.value)}</span>
+          <span class="trader-pnl ${pnlCls}">${t.pnl >= 0 ? '+' : ''}${fmtWon(t.pnl)} (${t.pnlPct >= 0 ? '+' : ''}${t.pnlPct.toFixed(2)}%)</span>
+          <div class="daily-goal-row">
+            <div class="daily-goal-label"><span>오늘 ${t.todayPct >= 0 ? '+' : ''}${t.todayPct.toFixed(1)}%</span><span>목표 +${t.dailyTargetPct}%</span></div>
+            <div class="daily-goal-bar"><div class="daily-goal-fill ${t.todayPct < 0 ? 'negative' : ''}" style="width:${goalRatio * 100}%"></div></div>
+          </div>
+          <div class="trader-holdings">${holdingsHtml}</div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  function renderTradersMobile() {
+    const grid = document.getElementById('tradersGridMobile');
     grid.innerHTML = latestTraders.map((t) => {
       const pnlCls = t.pnl > 0 ? 'up' : t.pnl < 0 ? 'down' : 'flat';
       const holdingsHtml = t.holdings.length
@@ -368,7 +474,8 @@
     latestLog = view.tradeLog;
     traderMeta = {};
     view.traders.forEach((t) => { traderMeta[t.id] = { name: t.name }; });
-    renderTraders();
+    renderTradersDesktop();
+    renderTradersMobile();
     renderLog();
   }
 
