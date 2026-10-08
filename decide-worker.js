@@ -26,16 +26,11 @@ const SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT'];
 const KRW_RATE = 1400; // 대략치, 실제 환율 API 붙이기 전까지 고정값
 const STATE_KEY = 'state';
 
-// Binance(fapi/api 전부)·Bybit·CoinGecko는 Cloudflare Workers의 엣지 IP를
-// 지역 차단(403/451)해서 서버에서는 호출이 안 된다 (브라우저에서 직접 쓸 땐
-// 문제없었음). OKX 퍼블릭 API는 Workers에서 막히지 않아 시세 소스로 사용.
-const OKX_SYMBOL_MAP = {
-  BTCUSDT: 'BTC-USDT-SWAP',
-  ETHUSDT: 'ETH-USDT-SWAP',
-  SOLUSDT: 'SOL-USDT-SWAP',
-  XRPUSDT: 'XRP-USDT-SWAP',
-  DOGEUSDT: 'DOGE-USDT-SWAP',
-};
+// 시세 소스 변천사: Binance(fapi/api 전부)·Bybit·CoinGecko는 Cloudflare
+// Workers 엣지 IP를 아예 차단(403/451/429)한다. OKX는 처음엔 됐지만 이후
+// 우리 쪽 요청에도 계속 429를 줘서(공유 엣지 IP 풀의 다른 트래픽 영향일
+// 가능성) 신뢰할 수 없었음. MEXC가 바이낸스와 거의 동일한 API 포맷을
+// 쓰면서 Workers에서 막히지 않아 최종적으로 이걸 사용.
 
 // 위험도(공격/안정/역발상)가 아니라 "어떤 신호에 반응하는 매매 스타일인가"로
 // 성격을 나눈다. 목표가 하루 +1%로 작아졌으니 셋 다 큰 승부를 걸 필요 없이
@@ -154,25 +149,23 @@ function goalReached(state, traderId, tickers) {
 
 async function fetchTickers() {
   // cron(2분)과 /decide-now에서만 호출된다 -- GET /state는 KV에 저장된
-  // 마지막 시세를 읽기만 해서 OKX를 직접 때리지 않는다 (예전엔 /state도
-  // 매번 OKX를 호출해서 5초 폴링 때문에 429에 자주 걸렸었음).
-  const res = await fetch('https://www.okx.com/api/v5/market/tickers?instType=SWAP', {
+  // 마지막 시세를 읽기만 해서 외부 API를 직접 때리지 않는다 (예전엔
+  // /state도 매번 호출해서 5초 폴링 때문에 429에 자주 걸렸었음).
+  const res = await fetch('https://api.mexc.com/api/v3/ticker/24hr', {
     cf: { cacheTtl: 8, cacheEverything: true },
   });
-  if (!res.ok) throw new Error(`OKX ticker fetch failed: ${res.status}`);
+  if (!res.ok) throw new Error(`MEXC ticker fetch failed: ${res.status}`);
   const data = await res.json();
-  const byInstId = {};
-  (data.data || []).forEach((d) => {
-    byInstId[d.instId] = d;
+  const bySymbol = {};
+  (data || []).forEach((d) => {
+    bySymbol[d.symbol] = d;
   });
   const map = {};
   SYMBOLS.forEach((sym) => {
-    const d = byInstId[OKX_SYMBOL_MAP[sym]];
+    const d = bySymbol[sym];
     if (!d) return;
-    const last = Number(d.last);
-    const open24h = Number(d.open24h);
-    const priceChangePercent = open24h > 0 ? ((last - open24h) / open24h) * 100 : 0;
-    map[sym] = { lastPrice: last, priceChangePercent };
+    // MEXC의 priceChangePercent는 소수(-0.0152 = -1.52%)라 100을 곱해 맞춘다.
+    map[sym] = { lastPrice: Number(d.lastPrice), priceChangePercent: Number(d.priceChangePercent) * 100 };
   });
   return map;
 }
