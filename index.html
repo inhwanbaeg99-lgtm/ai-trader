@@ -38,7 +38,55 @@
   .page-sub {
     font-size: 13px;
     color: var(--ink-sub);
+    margin-bottom: 14px;
+  }
+  .auto-mode-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 12px 14px;
     margin-bottom: 20px;
+  }
+  .auto-mode-label {
+    font-size: 13.5px;
+    font-weight: 700;
+  }
+  .auto-mode-sub {
+    font-size: 11.5px;
+    color: var(--ink-sub);
+    margin-top: 2px;
+  }
+  .auto-mode-toggle {
+    position: relative;
+    width: 44px;
+    height: 26px;
+    border-radius: 999px;
+    border: none;
+    background: var(--line);
+    cursor: pointer;
+    flex: 0 0 auto;
+    transition: background 0.2s ease;
+  }
+  .auto-mode-toggle.on {
+    background: var(--accent);
+  }
+  .auto-mode-toggle::after {
+    content: '';
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: #fff;
+    transition: transform 0.2s ease;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  }
+  .auto-mode-toggle.on::after {
+    transform: translateX(18px);
   }
   .traders-grid {
     display: grid;
@@ -188,6 +236,14 @@
   <div class="wrap">
     <div class="page-title">AI 가상 트레이더</div>
     <div class="page-sub" id="priceUpdatedNote">시세 불러오는 중...</div>
+
+    <div class="auto-mode-row">
+      <div>
+        <div class="auto-mode-label">자동 판단 (5분마다)</div>
+        <div class="auto-mode-sub" id="autoModeSub">꺼짐 - 버튼으로만 판단 요청</div>
+      </div>
+      <button type="button" class="auto-mode-toggle" id="autoModeToggle" aria-label="자동 판단 켜기/끄기"></button>
+    </div>
 
     <div class="traders-grid" id="tradersGrid"></div>
 
@@ -430,10 +486,48 @@
     note.innerHTML = `백엔드(Claude API 프록시)가 아직 연결 안 됐어요. Cloudflare Worker 배포 후 <code>index.html</code>의 <code>DECIDE_ENDPOINT</code> 값을 Worker URL로 채워주세요.`;
   }
 
+  // 자동 판단: 켜두면 5분마다 트레이더 A/B/C 순서로 판단 요청을 돌린다.
+  // 진짜 초단타는 아니고(LLM 호출은 몇 초씩 걸리고 비용도 들어서 틱 단위
+  // 스캘핑엔 안 맞음), 짧은 스윙 정도의 자동화다.
+  const AUTO_INTERVAL_MS = 5 * 60 * 1000;
+  let autoMode = localStorage.getItem('aitrader_auto') === '1';
+  let autoTimer = null;
+
+  function updateAutoModeUI() {
+    const toggle = document.getElementById('autoModeToggle');
+    const sub = document.getElementById('autoModeSub');
+    toggle.classList.toggle('on', autoMode);
+    sub.textContent = autoMode
+      ? (DECIDE_ENDPOINT ? '켜짐 - 5분마다 A/B/C 순서로 자동 판단' : '켜짐 (백엔드 미연결이라 대기 중)')
+      : '꺼짐 - 버튼으로만 판단 요청';
+  }
+
+  async function runAutoCycle() {
+    if (!DECIDE_ENDPOINT) return;
+    for (const t of TRADERS) {
+      await requestDecision(t.id);
+      await new Promise((r) => setTimeout(r, 2000)); // 호출 간 약간 간격
+    }
+  }
+
+  function setAutoMode(on) {
+    autoMode = on;
+    localStorage.setItem('aitrader_auto', on ? '1' : '0');
+    updateAutoModeUI();
+    if (autoTimer) clearInterval(autoTimer);
+    if (autoMode) {
+      runAutoCycle();
+      autoTimer = setInterval(runAutoCycle, AUTO_INTERVAL_MS);
+    }
+  }
+
+  document.getElementById('autoModeToggle').addEventListener('click', () => setAutoMode(!autoMode));
+
   loadState();
   renderTraders();
   renderLog();
   showConfigNoteIfNeeded();
+  setAutoMode(autoMode);
   refreshLoop();
   setInterval(refreshLoop, 5000);
 </script>
