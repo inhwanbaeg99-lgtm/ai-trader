@@ -241,7 +241,7 @@
 
     <div class="auto-mode-row">
       <div>
-        <div class="auto-mode-label">자동 판단 (5분마다)</div>
+        <div class="auto-mode-label">자동 판단 (30초마다)</div>
         <div class="auto-mode-sub" id="autoModeSub">꺼짐 - 버튼으로만 판단 요청</div>
       </div>
       <button type="button" class="auto-mode-toggle" id="autoModeToggle" aria-label="자동 판단 켜기/끄기"></button>
@@ -273,6 +273,7 @@
       persona: '너는 공격적인 단기 트레이더다. 변동성과 모멘텀을 적극적으로 추종하며, 확신이 서면 포지션을 크게 가져간다. 손절은 빠르지만 익절은 길게 끌고 간다.',
       stopLossPct: 4,
       takeProfitPct: 25,
+      leverage: 3,
     },
     {
       id: 'B',
@@ -282,6 +283,7 @@
       persona: '너는 보수적인 리스크 관리 중심 트레이더다. 한 종목에 자산의 20% 이상을 넣지 않고, 확실한 근거가 없으면 관망(hold)을 택한다. 분산 투자를 선호한다.',
       stopLossPct: 3,
       takeProfitPct: 8,
+      leverage: 1,
     },
     {
       id: 'C',
@@ -291,6 +293,7 @@
       persona: '너는 역발상(contrarian) 투자자다. 단기 급등은 과열로, 단기 급락은 과매도 기회로 해석하는 경향이 있다. 시장 분위기에 휩쓸리지 않는다.',
       stopLossPct: 6,
       takeProfitPct: 15,
+      leverage: 2,
     },
   ];
 
@@ -307,10 +310,13 @@
         p = null;
       }
       portfolios[t.id] = p || { cash: START_BALANCE, holdings: {} };
-      // 예전 형식(숫자 qty만 저장)으로 남아있는 데이터 방어적 변환
+      // 예전 형식(숫자 qty만, 또는 margin 없는 형식)으로 남아있는 데이터 방어적 변환
       Object.entries(portfolios[t.id].holdings).forEach(([sym, h]) => {
         if (typeof h === 'number') {
-          portfolios[t.id].holdings[sym] = { qty: h, avgPrice: tickers[sym] ? Number(tickers[sym].lastPrice) : 0 };
+          const price = tickers[sym] ? Number(tickers[sym].lastPrice) : 0;
+          portfolios[t.id].holdings[sym] = { qty: h, avgPrice: price, margin: h * price * krwRate };
+        } else if (h.margin === undefined) {
+          h.margin = h.qty * h.avgPrice * krwRate;
         }
       });
     });
@@ -332,12 +338,20 @@
     return Math.round(n).toLocaleString('ko-KR') + '원';
   }
 
+  // 포지션 가치 = 증거금(margin) + 레버리지 손익. 증거금+손익이 0 밑으로
+  // 가면 청산되어 전부 날아간 것으로 보고 0으로 고정한다(실제 마진거래처럼
+  // 증거금 이상 잃지는 않음).
+  function positionValue(h, currentPrice) {
+    const pnl = (currentPrice - h.avgPrice) * h.qty * krwRate;
+    return Math.max(0, h.margin + pnl);
+  }
+
   function portfolioValue(id) {
     const p = portfolios[id];
     let total = p.cash;
     Object.entries(p.holdings).forEach(([sym, h]) => {
       const t = tickers[sym];
-      if (t) total += h.qty * Number(t.lastPrice) * krwRate;
+      if (t && h.qty > 0) total += positionValue(h, Number(t.lastPrice));
     });
     return total;
   }
@@ -367,10 +381,10 @@
         ? heldEntries
             .map(([sym, h]) => {
               const tk = tickers[sym];
-              const val = tk ? h.qty * Number(tk.lastPrice) * krwRate : 0;
+              const val = tk ? positionValue(h, Number(tk.lastPrice)) : h.margin;
               const changePct = tk ? ((Number(tk.lastPrice) - h.avgPrice) / h.avgPrice) * 100 : 0;
               const changeCls = changePct > 0 ? 'up' : changePct < 0 ? 'down' : '';
-              return `<div class="holding-row"><span class="sym">${sym.replace('USDT', '')}</span><span class="val">${h.qty.toFixed(4)} · ${fmtWon(val)} <span class="${changeCls}">(${changePct >= 0 ? '+' : ''}${changePct.toFixed(1)}%)</span></span></div>`;
+              return `<div class="holding-row"><span class="sym">${sym.replace('USDT', '')} ${t.leverage}x</span><span class="val">${fmtWon(val)} <span class="${changeCls}">(가격 ${changePct >= 0 ? '+' : ''}${changePct.toFixed(1)}%)</span></span></div>`;
             })
             .join('')
         : '<div class="empty-holdings">보유 중인 자산 없음</div>';
@@ -444,6 +458,7 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           persona: trader.persona,
+          leverage: trader.leverage,
           portfolio: portfolios[traderId],
           market,
         }),
@@ -461,27 +476,34 @@
 
   function applyDecision(traderId, decision) {
     const p = portfolios[traderId];
+    const trader = TRADERS.find((x) => x.id === traderId);
     const { action, symbol, amountKrw, reason } = decision;
     if (action === 'buy' && symbol && amountKrw > 0) {
       const t = tickers[symbol];
       if (t && p.cash >= amountKrw) {
         const price = Number(t.lastPrice);
-        const qty = amountKrw / (price * krwRate);
-        const prev = p.holdings[symbol] || { qty: 0, avgPrice: price };
+        const margin = amountKrw; // 실제로 현금에서 빠지는 증거금
+        const notional = margin * trader.leverage; // 레버리지 적용된 포지션 크기
+        const qty = notional / (price * krwRate);
+        const prev = p.holdings[symbol] || { qty: 0, avgPrice: price, margin: 0 };
         const newQty = prev.qty + qty;
         // 추가 매수 시 평균 매입가를 수량 가중 평균으로 갱신
         const newAvgPrice = (prev.qty * prev.avgPrice + qty * price) / newQty;
-        p.holdings[symbol] = { qty: newQty, avgPrice: newAvgPrice };
-        p.cash -= amountKrw;
+        p.holdings[symbol] = { qty: newQty, avgPrice: newAvgPrice, margin: prev.margin + margin };
+        p.cash -= margin;
       }
     } else if (action === 'sell' && symbol) {
       const t = tickers[symbol];
       const prev = p.holdings[symbol];
       if (t && prev && prev.qty > 0) {
         const price = Number(t.lastPrice);
-        const sellQty = amountKrw ? Math.min(prev.qty, amountKrw / (price * krwRate)) : prev.qty;
-        p.holdings[symbol] = { qty: prev.qty - sellQty, avgPrice: prev.avgPrice };
-        p.cash += sellQty * price * krwRate;
+        // amountKrw는 '팔고 싶은 증거금 규모'로 해석, 없으면 전량 청산
+        const fraction = amountKrw ? Math.min(1, amountKrw / prev.margin) : 1;
+        const sellQty = prev.qty * fraction;
+        const releasedMargin = prev.margin * fraction;
+        const pnl = (price - prev.avgPrice) * sellQty * krwRate;
+        p.cash += Math.max(0, releasedMargin + pnl);
+        p.holdings[symbol] = { qty: prev.qty - sellQty, avgPrice: prev.avgPrice, margin: prev.margin - releasedMargin };
       }
     }
     savePortfolio(traderId);
@@ -504,12 +526,18 @@
         if (!tk) return;
         const price = Number(tk.lastPrice);
         const changePct = ((price - h.avgPrice) / h.avgPrice) * 100;
+        const value = positionValue(h, price);
         let triggered = null;
-        if (changePct <= -t.stopLossPct) triggered = `자동 손절 (${changePct.toFixed(1)}%, 기준 -${t.stopLossPct}%)`;
-        else if (changePct >= t.takeProfitPct) triggered = `자동 익절 (+${changePct.toFixed(1)}%, 기준 +${t.takeProfitPct}%)`;
+        if (value <= 0) {
+          triggered = `강제 청산 (레버리지 ${t.leverage}x, 증거금 전액 손실)`;
+        } else if (changePct <= -t.stopLossPct) {
+          triggered = `자동 손절 (가격 ${changePct.toFixed(1)}%, 기준 -${t.stopLossPct}%)`;
+        } else if (changePct >= t.takeProfitPct) {
+          triggered = `자동 익절 (가격 +${changePct.toFixed(1)}%, 기준 +${t.takeProfitPct}%)`;
+        }
         if (triggered) {
-          p.cash += h.qty * price * krwRate;
-          p.holdings[symbol] = { qty: 0, avgPrice: h.avgPrice };
+          p.cash += value;
+          p.holdings[symbol] = { qty: 0, avgPrice: h.avgPrice, margin: 0 };
           savePortfolio(t.id);
           tradeLog.push({ traderId: t.id, action: 'sell', symbol, reason: triggered, auto: true, ts: Date.now() });
           saveLog();
@@ -537,10 +565,10 @@
     note.innerHTML = `백엔드(Claude API 프록시)가 아직 연결 안 됐어요. Cloudflare Worker 배포 후 <code>index.html</code>의 <code>DECIDE_ENDPOINT</code> 값을 Worker URL로 채워주세요.`;
   }
 
-  // 자동 판단: 켜두면 5분마다 트레이더 A/B/C 순서로 판단 요청을 돌린다.
-  // 진짜 초단타는 아니고(LLM 호출은 몇 초씩 걸리고 비용도 들어서 틱 단위
-  // 스캘핑엔 안 맞음), 짧은 스윙 정도의 자동화다.
-  const AUTO_INTERVAL_MS = 5 * 60 * 1000;
+  // 자동 판단: 켜두면 30초마다 트레이더 A/B/C 순서로 판단 요청을 돌린다.
+  // Haiku 모델이라 호출당 비용/속도는 가볍지만, 그래도 틱 단위 스캘핑까진
+  // 아니고 빠른 스윙 정도의 자동화다.
+  const AUTO_INTERVAL_MS = 30 * 1000;
   let autoMode = localStorage.getItem('aitrader_auto') === '1';
   let autoTimer = null;
 
@@ -549,7 +577,7 @@
     const sub = document.getElementById('autoModeSub');
     toggle.classList.toggle('on', autoMode);
     sub.textContent = autoMode
-      ? (DECIDE_ENDPOINT ? '켜짐 - 5분마다 A/B/C 순서로 자동 판단' : '켜짐 (백엔드 미연결이라 대기 중)')
+      ? (DECIDE_ENDPOINT ? '켜짐 - 30초마다 A/B/C 순서로 자동 판단' : '켜짐 (백엔드 미연결이라 대기 중)')
       : '꺼짐 - 버튼으로만 판단 요청';
   }
 

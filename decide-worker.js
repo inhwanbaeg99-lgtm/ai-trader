@@ -18,27 +18,35 @@ function json(data, status = 200) {
 }
 
 const DECISION_SCHEMA_PROMPT = `
-너는 가상 투자 시뮬레이션의 트레이더다. 아래 성격/전략, 현재 보유 자산, 시장 시세를 보고
-매수/매도/관망 중 하나를 판단해라.
+너는 가상 투자 시뮬레이션의 트레이더다. 아래 성격/전략, 레버리지 배율, 현재 보유 자산,
+시장 시세를 보고 매수/매도/관망 중 하나를 판단해라.
+
+이 트레이더는 레버리지를 쓴다 -- amountKrw로 적은 금액은 "증거금"이고, 실제 포지션
+크기는 증거금 x 레버리지로 커진다. 손실도 그만큼 증폭되니 증거금 비중을 과도하게
+키우지 않도록 주의해라.
 
 반드시 아래 JSON 형식으로만 답해라. 다른 설명 텍스트는 붙이지 마라.
 {
   "action": "buy" | "sell" | "hold",
   "symbol": "BTCUSDT" 같은 심볼 (action이 hold면 null 가능),
-  "amountKrw": 매수/매도에 사용할 원화 금액 (정수, hold면 0),
+  "amountKrw": buy면 증거금으로 쓸 원화 금액, sell이면 청산하고 싶은 증거금 규모
+               (전량 청산이면 보유 증거금 전체 금액을 적어라, 정수, hold면 0),
   "reason": "판단 근거를 2~3문장 한국어로"
 }
 `.trim();
 
-async function callClaude(env, persona, portfolio, market) {
+async function callClaude(env, persona, leverage, portfolio, market) {
   const userContent = `
 [트레이더 성격/전략]
 ${persona}
 
+[레버리지]
+${leverage}x
+
 [현재 보유 현금]
 ${portfolio.cash}원
 
-[현재 보유 자산]
+[현재 보유 자산 (margin=증거금, qty=레버리지 적용된 수량, avgPrice=평균단가)]
 ${JSON.stringify(portfolio.holdings)}
 
 [현재 시세]
@@ -53,7 +61,7 @@ ${JSON.stringify(market)}
       'anthropic-version': '2023-06-01',
     },
     body: JSON.stringify({
-      model: 'claude-sonnet-5',
+      model: 'claude-haiku-4-5-20251001',
       max_tokens: 500,
       system: DECISION_SCHEMA_PROMPT,
       messages: [{ role: 'user', content: userContent }],
@@ -89,13 +97,13 @@ export default {
       return json({ error: '잘못된 요청 본문' }, 400);
     }
 
-    const { persona, portfolio, market } = body;
+    const { persona, leverage, portfolio, market } = body;
     if (!persona || !portfolio || !market) {
       return json({ error: 'persona, portfolio, market 필드가 모두 필요합니다' }, 400);
     }
 
     try {
-      const decision = await callClaude(env, persona, portfolio, market);
+      const decision = await callClaude(env, persona, leverage || 1, portfolio, market);
       return json(decision);
     } catch (e) {
       return json({ error: e.message }, 500);
