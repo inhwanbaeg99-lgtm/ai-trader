@@ -150,6 +150,8 @@
   }
   .holding-row .sym { font-weight: 700; }
   .holding-row .val { color: var(--ink-sub); }
+  .holding-row .val .up { color: var(--up); }
+  .holding-row .val .down { color: var(--down); }
   .empty-holdings {
     font-size: 12.5px;
     color: var(--ink-sub);
@@ -269,6 +271,8 @@
       badge: '공격형',
       desc: '변동성이 크더라도 추세와 모멘텀을 믿고 과감하게 베팅하는 성격.',
       persona: '너는 공격적인 단기 트레이더다. 변동성과 모멘텀을 적극적으로 추종하며, 확신이 서면 포지션을 크게 가져간다. 손절은 빠르지만 익절은 길게 끌고 간다.',
+      stopLossPct: 4,
+      takeProfitPct: 25,
     },
     {
       id: 'B',
@@ -276,6 +280,8 @@
       badge: '안정형',
       desc: '리스크 관리를 최우선으로, 분산과 작은 포지션을 선호하는 성격.',
       persona: '너는 보수적인 리스크 관리 중심 트레이더다. 한 종목에 자산의 20% 이상을 넣지 않고, 확실한 근거가 없으면 관망(hold)을 택한다. 분산 투자를 선호한다.',
+      stopLossPct: 3,
+      takeProfitPct: 8,
     },
     {
       id: 'C',
@@ -283,6 +289,8 @@
       badge: '역발상형',
       desc: '시장 심리가 과열되거나 과매도일 때 역으로 움직이는 역발상 투자 성격.',
       persona: '너는 역발상(contrarian) 투자자다. 단기 급등은 과열로, 단기 급락은 과매도 기회로 해석하는 경향이 있다. 시장 분위기에 휩쓸리지 않는다.',
+      stopLossPct: 6,
+      takeProfitPct: 15,
     },
   ];
 
@@ -299,6 +307,12 @@
         p = null;
       }
       portfolios[t.id] = p || { cash: START_BALANCE, holdings: {} };
+      // 예전 형식(숫자 qty만 저장)으로 남아있는 데이터 방어적 변환
+      Object.entries(portfolios[t.id].holdings).forEach(([sym, h]) => {
+        if (typeof h === 'number') {
+          portfolios[t.id].holdings[sym] = { qty: h, avgPrice: tickers[sym] ? Number(tickers[sym].lastPrice) : 0 };
+        }
+      });
     });
     try {
       tradeLog = JSON.parse(localStorage.getItem('aitrader_log') || '[]');
@@ -321,9 +335,9 @@
   function portfolioValue(id) {
     const p = portfolios[id];
     let total = p.cash;
-    Object.entries(p.holdings).forEach(([sym, qty]) => {
+    Object.entries(p.holdings).forEach(([sym, h]) => {
       const t = tickers[sym];
-      if (t) total += qty * Number(t.lastPrice) * krwRate;
+      if (t) total += h.qty * Number(t.lastPrice) * krwRate;
     });
     return total;
   }
@@ -348,13 +362,15 @@
       const pnl = value - START_BALANCE;
       const pnlPct = (pnl / START_BALANCE) * 100;
       const pnlCls = pnl > 0 ? 'up' : pnl < 0 ? 'down' : 'flat';
-      const holdingsHtml = Object.entries(p.holdings).filter(([, qty]) => qty > 0).length
-        ? Object.entries(p.holdings)
-            .filter(([, qty]) => qty > 0)
-            .map(([sym, qty]) => {
+      const heldEntries = Object.entries(p.holdings).filter(([, h]) => h.qty > 0);
+      const holdingsHtml = heldEntries.length
+        ? heldEntries
+            .map(([sym, h]) => {
               const tk = tickers[sym];
-              const val = tk ? qty * Number(tk.lastPrice) * krwRate : 0;
-              return `<div class="holding-row"><span class="sym">${sym.replace('USDT', '')}</span><span class="val">${qty.toFixed(4)} · ${fmtWon(val)}</span></div>`;
+              const val = tk ? h.qty * Number(tk.lastPrice) * krwRate : 0;
+              const changePct = tk ? ((Number(tk.lastPrice) - h.avgPrice) / h.avgPrice) * 100 : 0;
+              const changeCls = changePct > 0 ? 'up' : changePct < 0 ? 'down' : '';
+              return `<div class="holding-row"><span class="sym">${sym.replace('USDT', '')}</span><span class="val">${h.qty.toFixed(4)} · ${fmtWon(val)} <span class="${changeCls}">(${changePct >= 0 ? '+' : ''}${changePct.toFixed(1)}%)</span></span></div>`;
             })
             .join('')
         : '<div class="empty-holdings">보유 중인 자산 없음</div>';
@@ -398,7 +414,7 @@
         return `
           <div class="log-row">
             <div class="log-top">
-              <span class="log-trader">${traderName} · <span class="log-action ${l.action}">${actionLabel}</span>${l.symbol ? ' ' + l.symbol.replace('USDT', '') : ''}</span>
+              <span class="log-trader">${traderName} · <span class="log-action ${l.action}">${actionLabel}</span>${l.symbol ? ' ' + l.symbol.replace('USDT', '') : ''}${l.auto ? ' <span class="trader-badge">자동</span>' : ''}</span>
               <span class="log-time">${time}</span>
             </div>
             <div class="log-reason">${l.reason || ''}</div>
@@ -449,17 +465,23 @@
     if (action === 'buy' && symbol && amountKrw > 0) {
       const t = tickers[symbol];
       if (t && p.cash >= amountKrw) {
-        const qty = amountKrw / (Number(t.lastPrice) * krwRate);
-        p.holdings[symbol] = (p.holdings[symbol] || 0) + qty;
+        const price = Number(t.lastPrice);
+        const qty = amountKrw / (price * krwRate);
+        const prev = p.holdings[symbol] || { qty: 0, avgPrice: price };
+        const newQty = prev.qty + qty;
+        // 추가 매수 시 평균 매입가를 수량 가중 평균으로 갱신
+        const newAvgPrice = (prev.qty * prev.avgPrice + qty * price) / newQty;
+        p.holdings[symbol] = { qty: newQty, avgPrice: newAvgPrice };
         p.cash -= amountKrw;
       }
     } else if (action === 'sell' && symbol) {
       const t = tickers[symbol];
-      const have = p.holdings[symbol] || 0;
-      if (t && have > 0) {
-        const sellQty = amountKrw ? Math.min(have, amountKrw / (Number(t.lastPrice) * krwRate)) : have;
-        p.holdings[symbol] = have - sellQty;
-        p.cash += sellQty * Number(t.lastPrice) * krwRate;
+      const prev = p.holdings[symbol];
+      if (t && prev && prev.qty > 0) {
+        const price = Number(t.lastPrice);
+        const sellQty = amountKrw ? Math.min(prev.qty, amountKrw / (price * krwRate)) : prev.qty;
+        p.holdings[symbol] = { qty: prev.qty - sellQty, avgPrice: prev.avgPrice };
+        p.cash += sellQty * price * krwRate;
       }
     }
     savePortfolio(traderId);
@@ -469,11 +491,40 @@
     renderLog();
   }
 
+  // LLM 호출 없이, 가격이 갱신될 때마다(5초마다) 보유 포지션의 평균 매입가
+  // 대비 손익률을 즉시 체크해서 손절/익절 라인을 건드리면 바로 전량 매도한다.
+  // '판단 요청' 주기(최대 5분) 사이에 급락/급등 타이밍을 놓치는 걸 막기 위한
+  // 안전장치 -- API 비용 없음.
+  function checkStopLossAndTakeProfit() {
+    TRADERS.forEach((t) => {
+      const p = portfolios[t.id];
+      Object.entries(p.holdings).forEach(([symbol, h]) => {
+        if (h.qty <= 0) return;
+        const tk = tickers[symbol];
+        if (!tk) return;
+        const price = Number(tk.lastPrice);
+        const changePct = ((price - h.avgPrice) / h.avgPrice) * 100;
+        let triggered = null;
+        if (changePct <= -t.stopLossPct) triggered = `자동 손절 (${changePct.toFixed(1)}%, 기준 -${t.stopLossPct}%)`;
+        else if (changePct >= t.takeProfitPct) triggered = `자동 익절 (+${changePct.toFixed(1)}%, 기준 +${t.takeProfitPct}%)`;
+        if (triggered) {
+          p.cash += h.qty * price * krwRate;
+          p.holdings[symbol] = { qty: 0, avgPrice: h.avgPrice };
+          savePortfolio(t.id);
+          tradeLog.push({ traderId: t.id, action: 'sell', symbol, reason: triggered, auto: true, ts: Date.now() });
+          saveLog();
+        }
+      });
+    });
+  }
+
   async function refreshLoop() {
     try {
       await fetchTickers();
       document.getElementById('priceUpdatedNote').textContent = `${new Date().toLocaleTimeString('ko-KR')} 기준 시세`;
+      checkStopLossAndTakeProfit();
       renderTraders();
+      renderLog();
     } catch (e) {
       document.getElementById('priceUpdatedNote').textContent = '시세 로딩 실패, 재시도 중...';
     }
