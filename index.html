@@ -13,7 +13,7 @@
     --ink-sub: #8a8a8a;
     --up: #ff5c5c;
     --down: #3182f6;
-    --accent: #ffb020;
+    --accent: #8b5cf6;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
@@ -102,19 +102,19 @@
   }
   .trader-card.goal-hit {
     border-color: var(--accent);
-    box-shadow: 0 0 0 1px var(--accent), 0 0 24px rgba(255, 176, 32, 0.45);
+    box-shadow: 0 0 0 1px var(--accent), 0 0 24px rgba(139, 92, 246, 0.5);
     animation: goal-pulse 1.8s ease-in-out infinite;
   }
   @keyframes goal-pulse {
-    0%, 100% { box-shadow: 0 0 0 1px var(--accent), 0 0 18px rgba(255, 176, 32, 0.35); }
-    50% { box-shadow: 0 0 0 1px var(--accent), 0 0 32px rgba(255, 176, 32, 0.7); }
+    0%, 100% { box-shadow: 0 0 0 1px var(--accent), 0 0 18px rgba(139, 92, 246, 0.4); }
+    50% { box-shadow: 0 0 0 1px var(--accent), 0 0 32px rgba(139, 92, 246, 0.8); }
   }
   .goal-banner {
     display: flex;
     align-items: center;
     justify-content: space-between;
     background: var(--accent);
-    color: #1a1200;
+    color: #ffffff;
     font-size: 12px;
     font-weight: 800;
     padding: 6px 10px;
@@ -210,7 +210,7 @@
     border: none;
     border-radius: 10px;
     background: var(--accent);
-    color: #1a1200;
+    color: #ffffff;
     font-weight: 700;
     font-size: 13.5px;
     cursor: pointer;
