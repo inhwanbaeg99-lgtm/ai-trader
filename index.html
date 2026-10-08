@@ -13,7 +13,7 @@
     --ink-sub: #8a8a8a;
     --up: #ff5c5c;
     --down: #3182f6;
-    --accent: #9a97a3;
+    --accent: #000000;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
@@ -98,7 +98,7 @@
     .trader-card { padding: 10px; border-radius: 12px; }
     .trader-name { font-size: 13px; }
     .trader-badge { font-size: 8.5px; padding: 2px 5px; }
-    .trader-desc { font-size: 9.5px; min-height: 26px; margin-bottom: 8px; }
+    .trader-desc { font-size: 9.5px; height: 43px; overflow: hidden; margin-bottom: 8px; }
     .trader-balance { font-size: 14px; }
     .trader-pnl { font-size: 10px; margin-bottom: 8px; }
     .holding-row { font-size: 9.5px; }
@@ -113,12 +113,12 @@
   }
   .trader-card.goal-hit {
     border-color: var(--accent);
-    box-shadow: 0 0 0 1px var(--accent), 0 0 24px rgba(139, 92, 246, 0.5);
+    box-shadow: 0 0 0 1px var(--accent), 0 0 24px rgba(0, 0, 0, 0.5);
     animation: goal-pulse 1.8s ease-in-out infinite;
   }
   @keyframes goal-pulse {
-    0%, 100% { box-shadow: 0 0 0 1px var(--accent), 0 0 18px rgba(139, 92, 246, 0.4); }
-    50% { box-shadow: 0 0 0 1px var(--accent), 0 0 32px rgba(139, 92, 246, 0.8); }
+    0%, 100% { box-shadow: 0 0 0 1px var(--accent), 0 0 18px rgba(0, 0, 0, 0.4); }
+    50% { box-shadow: 0 0 0 1px var(--accent), 0 0 32px rgba(0, 0, 0, 0.8); }
   }
   .goal-banner {
     display: flex;
@@ -145,7 +145,7 @@
   .daily-goal-bar {
     height: 6px;
     border-radius: 999px;
-    background: var(--bg);
+    background: var(--line);
     overflow: hidden;
   }
   .daily-goal-fill {
@@ -180,7 +180,8 @@
     color: var(--ink-sub);
     line-height: 1.5;
     margin-bottom: 12px;
-    min-height: 36px;
+    height: 57px;
+    overflow: hidden;
   }
   .trader-balance {
     font-size: 22px;
