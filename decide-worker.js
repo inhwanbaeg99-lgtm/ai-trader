@@ -266,7 +266,19 @@ async function fetchTickers() {
 }
 
 // LLM 호출 없이, 매 사이클 가격을 확인해서 보유 포지션의 평균매입가 대비
-// 손익률이 손절/익절 라인에 닿으면 즉시 전량 매도한다.
+// 손익률이 손절/익절 라인에 닿으면 즉시 전량 매도한다. 매수 시점에 걸어두는
+// OCO(손절+익절) 주문과 같은 역할 -- 포지션이 열려 있는 동안은 이 함수만
+// 관여하고, Claude에게는 더 이상 "청산할지" 묻지 않는다(비용 절감 +
+// 추세 안 꺾였는데 소폭 이익에 성급히 파는 문제를 구조적으로 차단).
+//
+// BREAKEVEN_*: 한 번이라도 수익이 ACTIVATE_PCT 이상 찍혔다가(peakPnlPct로 기억)
+// 다시 LOCK_PCT 수준까지 줄어들면 손절선(-2.5%)까지 가기 전에 선청산한다.
+// "이겼다가 역전당해 손실로 끝나는" 거래를 줄여서 승률/기대값을 같이 끌어올리는
+// 장치 -- 실제 승률이 몇 %가 될지는 시장에 달려 있어 보장은 못 하지만, 구조적으로
+// 유리한 방향이다.
+const BREAKEVEN_ACTIVATE_PCT = 1.5;
+const BREAKEVEN_LOCK_PCT = 0.3;
+
 function checkStopLossAndTakeProfit(state, tickers) {
   TRADERS.forEach((t) => {
     const p = state.portfolios[t.id];
@@ -277,6 +289,7 @@ function checkStopLossAndTakeProfit(state, tickers) {
       const price = Number(tk.lastPrice);
       const priceChangePct = ((price - h.avgPrice) / h.avgPrice) * 100;
       const pnlPct = h.side === 'short' ? -priceChangePct : priceChangePct;
+      h.peakPnlPct = Math.max(h.peakPnlPct || 0, pnlPct);
       const value = positionValue(h, price);
       const sideLabel = h.side === 'short' ? '숏' : '롱';
       let triggered = null;
@@ -286,11 +299,13 @@ function checkStopLossAndTakeProfit(state, tickers) {
         triggered = `자동 손절 (${sideLabel}, 손익 ${pnlPct.toFixed(1)}%, 기준 -${t.stopLossPct}%)`;
       } else if (pnlPct >= t.takeProfitPct) {
         triggered = `자동 익절 (${sideLabel}, 손익 +${pnlPct.toFixed(1)}%, 기준 +${t.takeProfitPct}%)`;
+      } else if (h.peakPnlPct >= BREAKEVEN_ACTIVATE_PCT && pnlPct <= BREAKEVEN_LOCK_PCT) {
+        triggered = `수익 보호 청산 (${sideLabel}, 최고 +${h.peakPnlPct.toFixed(1)}% 찍고 +${pnlPct.toFixed(1)}%로 줄어들어 선청산)`;
       }
       if (triggered) {
         const realizedPnl = positionPnl(h, price);
         p.cash += value;
-        p.holdings[symbol] = { qty: 0, avgPrice: h.avgPrice, margin: 0, side: h.side };
+        p.holdings[symbol] = { qty: 0, avgPrice: h.avgPrice, margin: 0, side: h.side, peakPnlPct: 0 };
         state.tradeLog.push({ traderId: t.id, action: 'sell', symbol, reason: triggered, auto: true, ts: Date.now() });
         recordClosedTrade(state, t.id, { symbol, pnl: realizedPnl, pnlPct, ts: Date.now() });
       }
@@ -312,10 +327,10 @@ function applyDecision(state, traderId, decision, tickers) {
       const margin = amountKrw;
       const notional = margin * trader.leverage;
       const qty = notional / (price * KRW_RATE);
-      const base = prev && prev.qty > 0 ? prev : { qty: 0, avgPrice: price, margin: 0, side };
+      const base = prev && prev.qty > 0 ? prev : { qty: 0, avgPrice: price, margin: 0, side, peakPnlPct: 0 };
       const newQty = base.qty + qty;
       const newAvgPrice = (base.qty * base.avgPrice + qty * price) / newQty;
-      p.holdings[symbol] = { qty: newQty, avgPrice: newAvgPrice, margin: base.margin + margin, side };
+      p.holdings[symbol] = { qty: newQty, avgPrice: newAvgPrice, margin: base.margin + margin, side, peakPnlPct: base.peakPnlPct || 0 };
       p.cash -= margin;
     }
   } else if (action === 'sell' && symbol) {
@@ -357,30 +372,23 @@ market 데이터의 각 심볼에는 recentTrend가 같이 온다 ("최근 N회 
 3~4회 이상 같은 방향이면 이미 추세로 인정하고 행동해도 된다. 반대로 streak가
 1~2회뿐이고 방향이 자주 바뀐다면 아직 노이즈일 수 있으니 관망이 맞다.
 
-**이기는 포지션을 너무 일찍 끊지 마라.** 보유 중인 포지션이 추세 방향과 같은
-방향으로 수익이 나고 있고, 그 종목의 recentTrend streak가 아직 3연속 이상
-유지되고 있다면(즉 추세가 꺾였다는 신호가 없다면), 몇 천 원 수준의 작은
-이익만 보고 "승률이 낮으니 안전하게 청산하자" 같은 논리로 서둘러 팔지 마라.
-손절은 -2.5%라는 큰 폭으로 자동 실행되는데 익절은 매번 +0.1%도 안 되는
-수준에서 스스로 끊어버리면, 승률이 50%에 가까워도 전체 손익은 반드시
-마이너스가 된다. 이기는 포지션은 추세가 반대로 꺾이는 신호(streak 방향 전환)가
-나오거나 자동 익절(+5%) 기준에 닿을 때까지 들고 가는 게 기본값이고, 지는
-포지션은 짧게 끊는 게 맞는 방향이다.
+**너는 포지션이 없을 때(관망 상태)에만 호출된다.** 일단 롱/숏으로 진입하면
+그 다음부터는 손절(-2.5%), 익절(+5%), 그리고 수익이 한 번이라도 +1.5%를
+넘었다가 +0.3%까지 식으면 선청산하는 "수익 보호" 규칙, 이 세 가지 자동
+주문만으로 청산 타이밍이 결정되고 너에게는 다시 묻지 않는다(토큰 비용을
+아끼고, 추세가 안 꺾였는데 몇 천 원 수익에 성급히 파는 걸 막기 위함). 그러니
+진입 시점에 방향(롱/숏)과 증거금 비중을 신중하게 정해라 -- 한번 들어가면
+청산될 때까지 네가 중간에 손 쓸 수 없다.
 
 오늘 목표 수익률은 크지 않다(1~2% 안팎). 큰 승부를 걸어서 한 번에 채우려 하지
-말고, 확률 높은 기회를 노려서 목표를 채우는 데 집중해라. 다만 뚜렷한 추세를 타고
-있는 포지션이라면 작은 이익에 서둘러 만족하기보다 추세가 꺾일 때까지 들고 가는
-것도 괜찮다 -- 목표를 채우면 그날 매매는 자동으로 종료된다.
+말고, 확률 높은 기회를 노려서 목표를 채우는 데 집중해라. 목표를 채우면 그날
+매매는 자동으로 종료된다.
 
 아래에 네가 최근에 청산했던 거래들의 실제 손익 전적(승률/평균손익)이 요약되어
 주어진다. 이건 네 모델 자체가 학습된 게 아니라 매번 참고하라고 주는 경험
-피드백이다 -- 이 피드백은 "새 포지션에 얼마나 들어갈지/어떤 패턴을 경계할지"를
-판단할 때만 참고해라. **승률이 낮다는 이유로 이미 추세를 타고 수익 중인
-포지션을 조기 청산하는 근거로 쓰지는 마라** -- 그게 바로 손익을 마이너스로
-만드는 원인이다(승률은 괜찮은데 이기는 거래를 너무 짧게 끊어서 평균 손익이
-음수가 되는 패턴이 실제로 반복됐다). 특정 심볼/패턴에서 반복적으로 손실이
-났다면 그 진입 패턴 자체를 경계하고, 잘 통하고 있는 접근은 유지해라. 단, 몇
-건 안 되는 표본으로 성격 자체를 뒤집진 마라.
+피드백이다 -- 특정 심볼/방향/진입 패턴에서 반복적으로 손실이 났다면 그 패턴의
+진입 자체를 피하거나 증거금 비중을 줄이고, 잘 통하고 있는 접근(승률 높은
+패턴)은 비중을 유지해라. 단, 몇 건 안 되는 표본으로 성격 자체를 뒤집진 마라.
 
 반드시 아래 JSON 형식으로만 답해라. 다른 설명 텍스트는 붙이지 마라.
 {
@@ -447,6 +455,14 @@ async function runTraderDecision(env, state, tickers, traderId, auto) {
   const trader = TRADERS.find((t) => t.id === traderId);
   if (goalReached(state, traderId, tickers)) {
     return { traderId, skipped: true, reason: 'goal_reached' };
+  }
+  // 이미 보유 중인 포지션이 있으면 Claude를 호출하지 않는다 -- 청산은
+  // checkStopLossAndTakeProfit의 자동 손절/익절/수익보호 규칙(OCO 주문과
+  // 같은 역할)에만 맡긴다. 가격 체크(3분 주기)는 계속하지만 토큰이 드는
+  // Claude 호출은 "포지션이 없어서 새로 진입할지 판단해야 할 때"만 발생한다.
+  const holdingOpen = Object.values(state.portfolios[traderId].holdings).some((h) => h.qty > 0);
+  if (holdingOpen) {
+    return { traderId, skipped: true, reason: 'position_open_auto_managed' };
   }
   const market = SYMBOLS.map((s) => {
     const t = tickers[s];
