@@ -166,6 +166,39 @@ function markGoalHitToday(state, tickers) {
   });
 }
 
+// 목표를 채우면 "그날 매매 종료"라고 프론트에 보여주는데, 실제로는 Claude
+// 호출만 멈추고 보유 중이던 포지션은 손절/익절 라인에 닿을 때까지 계속
+// 떠 있었다(며칠이고 안 닿으면 계속 방치됨). 목표 달성 시점에 남은 포지션을
+// 바로 시장가로 전량 청산해서 "매매 종료"를 실제로 종료시킨다.
+function closeOpenPositionsOnGoalHit(state, tickers) {
+  TRADERS.forEach((t) => {
+    if (!goalReached(state, t.id, tickers)) return;
+    const p = state.portfolios[t.id];
+    Object.entries(p.holdings).forEach(([symbol, h]) => {
+      if (h.qty <= 0) return;
+      const tk = tickers[symbol];
+      if (!tk) return;
+      const price = Number(tk.lastPrice);
+      const value = positionValue(h, price);
+      const realizedPnl = positionPnl(h, price);
+      const priceChangePct = ((price - h.avgPrice) / h.avgPrice) * 100;
+      const pnlPct = h.side === 'short' ? -priceChangePct : priceChangePct;
+      const sideLabel = h.side === 'short' ? '숏' : '롱';
+      p.cash += value;
+      p.holdings[symbol] = { qty: 0, avgPrice: h.avgPrice, margin: 0, side: h.side, peakPnlPct: 0 };
+      state.tradeLog.push({
+        traderId: t.id,
+        action: 'sell',
+        symbol,
+        reason: `오늘 목표(+${t.dailyTargetPct}%) 달성으로 전량 매도 후 매매 종료 (${sideLabel})`,
+        auto: true,
+        ts: Date.now(),
+      });
+      recordClosedTrade(state, t.id, { symbol, pnl: realizedPnl, pnlPct, ts: Date.now() });
+    });
+  });
+}
+
 async function generateDayComment(env, trader, pctReturn, hit, trades) {
   const tradesText = trades.length
     ? trades
@@ -580,6 +613,7 @@ export class TraderEngine {
     await rolloverDayIfNeeded(this.env, state, tickers);
     markGoalHitToday(state, tickers);
     checkStopLossAndTakeProfit(state, tickers);
+    closeOpenPositionsOnGoalHit(state, tickers);
     // 3명을 동시에 판단시킨다 -- 순서대로 돌리면 사이클 하나에 Claude 호출
     // 3번이 직렬로 쌓여서 짧은 주기를 맞추기 어렵다. 트레이더별로 포트폴리오가
     // 분리돼 있어 동시 실행해도 서로의 state를 침범하지 않는다.
@@ -624,6 +658,7 @@ export class TraderEngine {
       await rolloverDayIfNeeded(this.env, state, tickers);
       markGoalHitToday(state, tickers);
       checkStopLossAndTakeProfit(state, tickers);
+      closeOpenPositionsOnGoalHit(state, tickers);
       const result = await runTraderDecision(this.env, state, tickers, traderId, false);
       await this.saveState(state);
       return json({ result, view: buildStateView(state, tickers) });
