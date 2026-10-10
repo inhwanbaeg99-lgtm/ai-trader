@@ -2,6 +2,9 @@ name = "ai-trader-decide"
 main = "decide-worker.js"
 compatibility_date = "2024-11-01"
 
+[triggers]
+crons = []
+
 [[durable_objects.bindings]]
 name = "TRADER_ENGINE"
 class_name = "TraderEngine"
