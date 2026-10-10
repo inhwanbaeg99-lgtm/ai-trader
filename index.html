@@ -79,7 +79,7 @@
     transition: background 0.2s ease;
   }
   .auto-mode-toggle.on {
-    background: #22c55e;
+    background: var(--ink);
   }
   .auto-mode-toggle::after {
     content: '';
@@ -90,11 +90,12 @@
     height: 20px;
     border-radius: 50%;
     background: #fff;
-    transition: transform 0.2s ease;
+    transition: transform 0.2s ease, background 0.2s ease;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
   }
   .auto-mode-toggle.on::after {
     transform: translateX(18px);
+    background: var(--bg);
   }
   /* 트레이더 1명만 쓰므로 데스크탑도 가운데 정렬된 카드 하나로 표시. */
   .traders-grid-desktop { display: none; }
