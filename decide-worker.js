@@ -62,7 +62,7 @@ function defaultState() {
     tradeHistory[t.id] = [];
     dailyHistory[t.id] = [];
   });
-  return { portfolios, dailyBase, tradeLog: [], tickers: {}, tradeHistory, dailyHistory, priceHistory: {} };
+  return { portfolios, dailyBase, tradeLog: [], tickers: {}, tradeHistory, dailyHistory, priceHistory: {}, lastCycleAt: null };
 }
 
 // 시세는 매 사이클 스냅샷 하나뿐이라 "지금이 추세인지"를 모델이 판단할 근거가
@@ -78,7 +78,7 @@ function updatePriceHistory(state, tickers) {
     const t = tickers[sym];
     if (!t) return;
     const hist = state.priceHistory[sym] || (state.priceHistory[sym] = []);
-    hist.push({ price: Number(t.lastPrice), ts: now });
+    hist.push({ price: Number(t.lastPrice), ts: now, volume: Number(t.quoteVolume || 0) });
     if (hist.length > PRICE_HISTORY_LIMIT) hist.splice(0, hist.length - PRICE_HISTORY_LIMIT);
   });
 }
@@ -99,6 +99,59 @@ function describeTrend(state, sym) {
   const pct = first > 0 ? ((last - first) / first) * 100 : 0;
   const dirLabel = dir === 'up' ? '상승' : '하락';
   return `최근 ${hist.length}회 체크 중 ${dirLabel} ${streak}연속, 구간 수익률 ${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
+}
+
+// recentTrend(연속 streak)만으로는 "가격만 보고" 판단하는 거라 횡보장
+// 노이즈에 잘 속는다. RSI와 거래량을 보조 신호로 추가해서 판단 근거를
+// 좀 더 단단하게 만든다 -- RSI는 과매수/과매도, 거래량은 "그 움직임이
+// 진짜 수급을 동반했는지"를 보여준다.
+function computeRSI(hist, period = 14) {
+  if (hist.length < period + 1) return null;
+  const recent = hist.slice(-(period + 1));
+  let gains = 0;
+  let losses = 0;
+  for (let i = 1; i < recent.length; i++) {
+    const diff = recent[i].price - recent[i - 1].price;
+    if (diff > 0) gains += diff;
+    else losses += -diff;
+  }
+  const avgGain = gains / period;
+  const avgLoss = losses / period;
+  if (avgLoss === 0) return avgGain === 0 ? 50 : 100;
+  const rs = avgGain / avgLoss;
+  return 100 - 100 / (1 + rs);
+}
+
+function describeRSI(state, sym) {
+  const hist = (state.priceHistory && state.priceHistory[sym]) || [];
+  const rsi = computeRSI(hist);
+  if (rsi === null) return null;
+  const rounded = Math.round(rsi * 10) / 10;
+  let label = '중립';
+  if (rsi >= 70) label = '과매수';
+  else if (rsi <= 30) label = '과매도';
+  return { value: rounded, label };
+}
+
+// 24시간 누적 거래대금(quoteVolume)의 체크 간 증가분을 "그 3분 동안의
+// 체결 대금"으로 근사하고, 최근 구간 평균과 비교해서 지금 움직임에
+// 거래량이 실제로 동반됐는지를 본다. 거래량 없는 가격 변동은 노이즈일
+// 가능성이 높다.
+function describeVolume(state, sym) {
+  const hist = (state.priceHistory && state.priceHistory[sym]) || [];
+  if (hist.length < 4) return '거래량 데이터 부족';
+  const deltas = [];
+  for (let i = 1; i < hist.length; i++) {
+    const d = hist[i].volume - hist[i - 1].volume;
+    deltas.push(d > 0 ? d : 0);
+  }
+  const latest = deltas[deltas.length - 1];
+  const avg = deltas.reduce((s, v) => s + v, 0) / deltas.length;
+  if (avg <= 0) return '거래량 데이터 부족';
+  const ratio = latest / avg;
+  if (ratio >= 1.5) return `거래량 급증 (평균 대비 ${ratio.toFixed(1)}배)`;
+  if (ratio <= 0.5) return `거래량 저조 (평균 대비 ${ratio.toFixed(1)}배)`;
+  return `거래량 평이 (평균 대비 ${ratio.toFixed(1)}배)`;
 }
 
 // 실제 모델 파인튜닝은 아니고, 트레이더별 "청산된 거래의 실현손익" 기록을
@@ -185,7 +238,7 @@ function closeOpenPositionsOnGoalHit(state, tickers) {
       const pnlPct = h.side === 'short' ? -priceChangePct : priceChangePct;
       const sideLabel = h.side === 'short' ? '숏' : '롱';
       p.cash += value;
-      p.holdings[symbol] = { qty: 0, avgPrice: h.avgPrice, margin: 0, side: h.side, peakPnlPct: 0 };
+      p.holdings[symbol] = { qty: 0, avgPrice: h.avgPrice, margin: 0, side: h.side, peakPnlPct: 0, openedAt: null };
       state.tradeLog.push({
         traderId: t.id,
         action: 'sell',
@@ -293,7 +346,14 @@ async function fetchTickers() {
     const d = bySymbol[sym];
     if (!d) return;
     // MEXC의 priceChangePercent는 소수(-0.0152 = -1.52%)라 100을 곱해 맞춘다.
-    map[sym] = { lastPrice: Number(d.lastPrice), priceChangePercent: Number(d.priceChangePercent) * 100 };
+    // quoteVolume은 24시간 누적 거래대금(원화 아님, 코인 자체 기준) -- 매 체크마다
+    // 스냅샷을 남겨서 연속된 두 체크의 차이로 "그 구간에 실제로 거래된 대금"을
+    // 근사해 거래량 신호를 만든다.
+    map[sym] = {
+      lastPrice: Number(d.lastPrice),
+      priceChangePercent: Number(d.priceChangePercent) * 100,
+      quoteVolume: Number(d.quoteVolume || 0),
+    };
   });
   return map;
 }
@@ -312,7 +372,16 @@ async function fetchTickers() {
 const BREAKEVEN_ACTIVATE_PCT = 1.5;
 const BREAKEVEN_LOCK_PCT = 0.3;
 
+// 손절/익절/수익보호 셋 다 안 닿으면 포지션이 무한정 떠있을 수 있다 --
+// 방향성 없이 오래 묶여있는 자본은 비효율이니, 일정 시간이 지나도록
+// 거의 안 움직였으면(손익이 좁은 범위 안) 정리하고 자본을 회수한다.
+// 뚜렷하게 수익/손실 중인 포지션은 이 조건에 안 걸리므로(STALE_PNL_BAND_PCT
+// 밖이면 트리거 안 됨) "이기는 포지션 조기 청산 금지" 원칙과 충돌하지 않는다.
+const MAX_HOLD_MS = 4 * 60 * 60 * 1000;
+const STALE_PNL_BAND_PCT = 0.5;
+
 function checkStopLossAndTakeProfit(state, tickers) {
+  const now = Date.now();
   TRADERS.forEach((t) => {
     const p = state.portfolios[t.id];
     Object.entries(p.holdings).forEach(([symbol, h]) => {
@@ -325,6 +394,7 @@ function checkStopLossAndTakeProfit(state, tickers) {
       h.peakPnlPct = Math.max(h.peakPnlPct || 0, pnlPct);
       const value = positionValue(h, price);
       const sideLabel = h.side === 'short' ? '숏' : '롱';
+      const heldMs = now - (h.openedAt || now);
       let triggered = null;
       if (value <= 0) {
         triggered = `강제 청산 (${sideLabel} 레버리지 ${t.leverage}x, 증거금 전액 손실)`;
@@ -334,17 +404,28 @@ function checkStopLossAndTakeProfit(state, tickers) {
         triggered = `자동 익절 (${sideLabel}, 손익 +${pnlPct.toFixed(1)}%, 기준 +${t.takeProfitPct}%)`;
       } else if (h.peakPnlPct >= BREAKEVEN_ACTIVATE_PCT && pnlPct <= BREAKEVEN_LOCK_PCT) {
         triggered = `수익 보호 청산 (${sideLabel}, 최고 +${h.peakPnlPct.toFixed(1)}% 찍고 +${pnlPct.toFixed(1)}%로 줄어들어 선청산)`;
+      } else if (heldMs >= MAX_HOLD_MS && Math.abs(pnlPct) < STALE_PNL_BAND_PCT) {
+        triggered = `장시간 방향성 없어 자동 정리 (${sideLabel}, ${(heldMs / 3600000).toFixed(1)}시간 보유, 손익 ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%)`;
       }
       if (triggered) {
         const realizedPnl = positionPnl(h, price);
         p.cash += value;
-        p.holdings[symbol] = { qty: 0, avgPrice: h.avgPrice, margin: 0, side: h.side, peakPnlPct: 0 };
+        p.holdings[symbol] = { qty: 0, avgPrice: h.avgPrice, margin: 0, side: h.side, peakPnlPct: 0, openedAt: null };
         state.tradeLog.push({ traderId: t.id, action: 'sell', symbol, reason: triggered, auto: true, ts: Date.now() });
         recordClosedTrade(state, t.id, { symbol, pnl: realizedPnl, pnlPct, ts: Date.now() });
       }
     });
   });
 }
+
+// 여러 종목을 동시에 보유할 수 있게 되면서, 종목별로는 리스크 관리를
+// 해도 "전체적으로 얼마나 베팅 중인지"는 아무도 안 보는 문제가 생긴다.
+// BTC/ETH/SOL/XRP/DOGE는 급락장에서 같이 움직이는 경향이 커서, 여러
+// 종목에 나눠 들어가도 실제로는 분산이 아니라 레버리지가 겹치는
+// 효과일 수 있다. 전체 포트폴리오 가치 대비 동시 보유 가능한 총
+// 증거금 비율에 상한을 둬서, 새 진입이 그 상한을 넘으면 증거금을
+// 줄이거나(여유분만큼) 아예 막는다.
+const MAX_TOTAL_EXPOSURE_PCT = 60;
 
 function applyDecision(state, traderId, decision, tickers) {
   const p = state.portfolios[traderId];
@@ -355,16 +436,34 @@ function applyDecision(state, traderId, decision, tickers) {
     const t = tickers[symbol];
     const prev = p.holdings[symbol];
     const blocked = prev && prev.qty > 0 && prev.side !== side;
-    if (t && !blocked && p.cash >= amountKrw) {
+    const totalValue = portfolioValue(p, tickers);
+    const committedMargin = Object.values(p.holdings).reduce((s, h) => s + (h.qty > 0 ? h.margin : 0), 0);
+    const maxAllowedMargin = totalValue * (MAX_TOTAL_EXPOSURE_PCT / 100);
+    const room = Math.max(0, maxAllowedMargin - committedMargin);
+    const cappedAmount = Math.min(amountKrw, room);
+    if (t && !blocked && cappedAmount > 0 && p.cash >= cappedAmount) {
       const price = Number(t.lastPrice);
-      const margin = amountKrw;
+      const margin = cappedAmount;
       const notional = margin * trader.leverage;
       const qty = notional / (price * KRW_RATE);
-      const base = prev && prev.qty > 0 ? prev : { qty: 0, avgPrice: price, margin: 0, side, peakPnlPct: 0 };
+      const base = prev && prev.qty > 0 ? prev : { qty: 0, avgPrice: price, margin: 0, side, peakPnlPct: 0, openedAt: Date.now() };
       const newQty = base.qty + qty;
       const newAvgPrice = (base.qty * base.avgPrice + qty * price) / newQty;
-      p.holdings[symbol] = { qty: newQty, avgPrice: newAvgPrice, margin: base.margin + margin, side, peakPnlPct: base.peakPnlPct || 0 };
+      p.holdings[symbol] = {
+        qty: newQty,
+        avgPrice: newAvgPrice,
+        margin: base.margin + margin,
+        side,
+        peakPnlPct: base.peakPnlPct || 0,
+        openedAt: base.openedAt || Date.now(),
+      };
       p.cash -= margin;
+      if (cappedAmount < amountKrw) {
+        decision.reason = `${reason} [전체 노출 한도(${MAX_TOTAL_EXPOSURE_PCT}%)로 증거금 ${amountKrw.toLocaleString('ko-KR')}→${Math.round(cappedAmount).toLocaleString('ko-KR')}원 축소]`;
+      }
+    } else if (t && !blocked && cappedAmount <= 0) {
+      decision.action = 'hold';
+      decision.reason = `${reason} [전체 노출 한도(${MAX_TOTAL_EXPOSURE_PCT}%) 초과로 진입 보류]`;
     }
   } else if (action === 'sell' && symbol) {
     const t = tickers[symbol];
@@ -382,7 +481,7 @@ function applyDecision(state, traderId, decision, tickers) {
       recordClosedTrade(state, traderId, { symbol, pnl, pnlPct, ts: Date.now() });
     }
   }
-  state.tradeLog.push({ traderId, action, symbol, reason, auto: !!decision.auto, ts: Date.now() });
+  state.tradeLog.push({ traderId, action: decision.action, symbol, reason: decision.reason, auto: !!decision.auto, ts: Date.now() });
 }
 
 const DECISION_SCHEMA_PROMPT = `
@@ -401,15 +500,22 @@ const DECISION_SCHEMA_PROMPT = `
 
 **여러 종목을 동시에 보유해도 된다.** 이미 한두 종목에 포지션이 있어도,
 다른 종목에서 괜찮은 기회가 보이면 추가로 진입해서 분산해도 괜찮다. 다만
-현금은 모든 포지션이 같이 쓰는 자원이니, 한 종목에 몰빵하지 말고 전체
-노출(이미 열려있는 포지션들 + 새로 진입할 포지션)을 감안해서 증거금
-비중을 정해라.
+BTC/ETH/SOL/XRP/DOGE는 급락장에서 서로 같이 움직이는 경향이 커서, 여러
+종목에 나눠 들어가도 실제 리스크 분산 효과는 생각보다 작을 수 있다 --
+전체 포트폴리오 가치의 ${MAX_TOTAL_EXPOSURE_PCT}%까지만 동시에 증거금으로
+묶을 수 있도록 시스템이 자동으로 제한하니(넘으면 증거금이 줄거나 진입이
+보류됨), 그 안에서 종목별 비중을 알아서 합리적으로 배분해라.
 
-market 데이터의 각 심볼에는 recentTrend가 같이 온다 ("최근 N회 체크 중
-하락 5연속, 구간 수익률 -2.3%" 같은 식) -- 이게 네가 찾아야 할 "추세 확인"
-신호다. 매번 "아직 명확한 추세가 아니다"라며 관망만 반복하지 마라 -- 연속
-3~4회 이상 같은 방향이면 이미 추세로 인정하고 행동해도 된다. 반대로 streak가
-1~2회뿐이고 방향이 자주 바뀐다면 아직 노이즈일 수 있으니 관망이 맞다.
+market 데이터의 각 심볼에는 recentTrend/rsi/volumeSignal이 같이 온다.
+recentTrend는 "최근 N회 체크 중 하락 5연속, 구간 수익률 -2.3%" 같은 식으로
+방향성 확인용이고, rsi는 과매수(70 이상)/과매도(30 이하)/중립을 보여주고,
+volumeSignal은 그 가격 움직임에 거래량이 실제로 동반됐는지("거래량 급증"
+"거래량 저조")를 보여준다. 셋을 같이 봐라 -- recentTrend가 연속 3~4회 이상
+같은 방향이어도 거래량이 저조하면 노이즈일 가능성이 있고, 반대로 거래량
+급증을 동반한 추세는 신뢰도가 더 높다. RSI가 과매수인데 추가로 롱 진입하거나
+과매도인데 추가로 숏 진입하는 건 피해라(되돌림 리스크). 매번 "아직 명확한
+추세가 아니다"라며 관망만 반복하지는 마라 -- 신호들이 같은 방향을 가리키면
+행동해도 된다.
 
 **이미 보유 중인 포지션을 너무 일찍 끊지 마라.** 너는 포지션이 있어도 3분마다
 계속 호출된다 -- 보유 중인 포지션이 추세 방향과 같은 방향으로 수익이 나고
@@ -506,11 +612,14 @@ async function runTraderDecision(env, state, tickers, traderId, auto) {
   const market = SYMBOLS.map((s) => {
     const t = tickers[s];
     if (!t) return null;
+    const rsi = describeRSI(state, s);
     return {
       symbol: s,
       price: Number(t.lastPrice),
       changePercent: Number(t.priceChangePercent),
       recentTrend: describeTrend(state, s),
+      rsi: rsi ? `${rsi.value} (${rsi.label})` : '데이터 쌓이는 중',
+      volumeSignal: describeVolume(state, s),
     };
   }).filter(Boolean);
   try {
@@ -568,6 +677,7 @@ function buildStateView(state, tickers) {
   });
   return {
     serverTime: Date.now(),
+    lastCycleAt: state.lastCycleAt || null,
     krwRate: KRW_RATE,
     startBalance: START_BALANCE,
     intervalSeconds: INTERVAL_SECONDS,
@@ -603,6 +713,7 @@ export class TraderEngine {
       tradeHistory: { ...base.tradeHistory, ...raw.tradeHistory },
       dailyHistory: { ...base.dailyHistory, ...raw.dailyHistory },
       priceHistory: raw.priceHistory || {},
+      lastCycleAt: raw.lastCycleAt || null,
     };
   }
 
@@ -626,6 +737,7 @@ export class TraderEngine {
     const results = await Promise.all(
       TRADERS.map((t) => runTraderDecision(this.env, state, tickers, t.id, auto))
     );
+    state.lastCycleAt = Date.now();
     await this.saveState(state);
     return { state, tickers, results };
   }
@@ -666,6 +778,7 @@ export class TraderEngine {
       checkStopLossAndTakeProfit(state, tickers);
       closeOpenPositionsOnGoalHit(state, tickers);
       const result = await runTraderDecision(this.env, state, tickers, traderId, false);
+      state.lastCycleAt = Date.now();
       await this.saveState(state);
       return json({ result, view: buildStateView(state, tickers) });
     }

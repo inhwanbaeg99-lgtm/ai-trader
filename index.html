@@ -608,7 +608,18 @@
       if (!res.ok) throw new Error('상태 조회 실패');
       const view = await res.json();
       applyView(view);
-      document.getElementById('priceUpdatedNote').textContent = `${new Date(view.serverTime).toLocaleTimeString('ko-KR')} 기준`;
+      const note = document.getElementById('priceUpdatedNote');
+      if (view.lastCycleAt) {
+        const diffMin = Math.floor((view.serverTime - view.lastCycleAt) / 60000);
+        const timeStr = new Date(view.lastCycleAt).toLocaleTimeString('ko-KR');
+        const diffText = diffMin <= 0 ? '방금' : `${diffMin}분 전`;
+        // 판단 주기가 3분이라 평소엔 0~3분 전이 정상. 그보다 훨씬 오래 지났으면
+        // 알람이 멈췄을 가능성이 있다는 신호.
+        const stale = diffMin >= 7 ? ' ⚠️ 알람이 멈췄을 수 있어요' : '';
+        note.textContent = `마지막 체크 ${timeStr} (${diffText})${stale}`;
+      } else {
+        note.textContent = `${new Date(view.serverTime).toLocaleTimeString('ko-KR')} 기준 (첫 사이클 대기 중)`;
+      }
     } catch (e) {
       document.getElementById('priceUpdatedNote').textContent = '서버 상태 로딩 실패, 재시도 중...';
     }
