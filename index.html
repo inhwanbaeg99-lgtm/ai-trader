@@ -495,7 +495,7 @@
           <span class="trader-balance">${fmtWon(t.value)}</span>
           <span class="trader-pnl ${pnlCls}">${t.pnl >= 0 ? '+' : ''}${fmtWon(t.pnl)} (${t.pnlPct >= 0 ? '+' : ''}${t.pnlPct.toFixed(2)}%)</span>
           <div class="daily-goal-row">
-            <div class="daily-goal-label"><span>오늘 비용 차감 후 ${t.todayPct >= 0 ? '+' : ''}${t.todayPct.toFixed(1)}%</span><span>비용 차감 후 목표 +${t.dailyTargetPct}%</span></div>
+            <div class="daily-goal-label"><span>${t.todayPct >= 0 ? '+' : ''}${t.todayPct.toFixed(1)}%</span><span>+${t.dailyTargetPct}%</span></div>
             <div class="daily-goal-bar"><div class="daily-goal-fill ${t.todayPct < 0 ? 'negative' : ''}" style="width:${goalRatio * 100}%"></div></div>
           </div>
           <div class="trader-holdings">${holdingsHtml}</div>
