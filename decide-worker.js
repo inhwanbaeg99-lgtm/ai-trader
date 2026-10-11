@@ -23,6 +23,9 @@ function json(data, status = 200) {
 const START_BALANCE = 10000000; // 트레이더당 가상 시드머니 1천만원
 const SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT'];
 const KRW_RATE = 1400; // 대략치, 실제 환율 API 붙이기 전까지 고정값
+// 모의 비용 가정이며 실제 거래소 요율/펀딩 정산을 뜻하지 않는다.
+const COST_MODEL = { version: 1, feeRate: 0.0005, slippageRate: 0.0002,
+  fundingRatePer8h: 0.0001, fundingPeriodMs: 8 * 60 * 60 * 1000 };
 const INTERVAL_SECONDS = 180; // 판단 주기 -- 당분간 비용 아끼면서 전적 데이터부터 쌓는 단계라 3분으로 조정
 
 // 시세 소스 변천사: Binance(fapi/api 전부)·Bybit·CoinGecko는 Cloudflare
@@ -62,7 +65,7 @@ function defaultState() {
     tradeHistory[t.id] = [];
     dailyHistory[t.id] = [];
   });
-  return { portfolios, dailyBase, tradeLog: [], tickers: {}, tradeHistory, dailyHistory, priceHistory: {}, lastCycleAt: null };
+  return { portfolios, dailyBase, tradeLog: [], tickers: {}, tradeHistory, dailyHistory, priceHistory: {}, performanceTracking: {}, costEnabledAt: null, lastCycleAt: null };
 }
 
 // 1분봉 3개를 묶어 완전히 종료된 3분봉만 사용한다.
@@ -184,7 +187,7 @@ function describeVolume(state, sym) {
 // 실제 모델 파인튜닝은 아니고, 트레이더별 "청산된 거래의 실현손익" 기록을
 // 따로 모아뒀다가 다음 판단 프롬프트에 요약해서 넣어주는 식의 자기반성
 // 피드백 루프 -- 최근 전적(승률/평균손익)을 보고 스스로 전략을 미세조정하게 한다.
-const TRADE_HISTORY_LIMIT = 30;
+const TRADE_HISTORY_LIMIT = 1000;
 
 function recordClosedTrade(state, traderId, entry) {
   const hist = state.tradeHistory[traderId] || (state.tradeHistory[traderId] = []);
@@ -193,21 +196,31 @@ function recordClosedTrade(state, traderId, entry) {
 }
 
 function computePerformanceStats(state, traderId) {
-  const hist = state.tradeHistory[traderId] || [];
-  if (!hist.length) return { count: 0, wins: 0, winRate: 0, avgPnl: 0, recent: [] };
+  const all = state.tradeHistory[traderId] || [];
+  const hist = all.filter((h) => h.costVersion === COST_MODEL.version);
   const wins = hist.filter((h) => h.pnl > 0).length;
-  const winRate = (wins / hist.length) * 100;
-  const avgPnl = hist.reduce((s, h) => s + h.pnl, 0) / hist.length;
-  return { count: hist.length, wins, winRate, avgPnl, recent: hist.slice(-5) };
+  const totalPnl = hist.reduce((sum, h) => sum + h.pnl, 0);
+  const totalCosts = hist.reduce((sum, h) => sum + h.totalCosts, 0);
+  const grouped = {};
+  hist.forEach((h) => {
+    const key = `${h.symbol}:${h.side}`;
+    const row = grouped[key] || (grouped[key] = { symbol: h.symbol, side: h.side, count: 0, netPnl: 0 });
+    row.count++;
+    row.netPnl += h.pnl;
+  });
+  return { count: hist.length, wins, winRate: hist.length ? wins / hist.length * 100 : 0,
+    avgPnl: hist.length ? totalPnl / hist.length : 0, totalPnl, totalCosts,
+    legacyCount: all.length - hist.length, recent: hist.slice(-5), groups: Object.values(grouped),
+    maxDrawdownPct: state.performanceTracking?.[traderId]?.maxDrawdownPct || 0 };
 }
 
 function buildPerformanceSummary(state, traderId) {
   const stats = computePerformanceStats(state, traderId);
-  if (!stats.count) return '아직 청산한 거래 기록이 없음 (참고할 과거 전적 없음).';
+  if (!stats.count) return '비용 적용 후 신규 포지션의 청산 기록이 아직 없음. 이전 무비용 거래와 비교하지 마라.';
   const recentText = stats.recent
     .map((h) => `${h.symbol.replace('USDT', '')} ${h.pnl >= 0 ? '+' : ''}${Math.round(h.pnl).toLocaleString('ko-KR')}원`)
     .join(', ');
-  return `최근 청산 ${stats.count}건 중 ${stats.wins}승 ${stats.count - stats.wins}패 (승률 ${stats.winRate.toFixed(0)}%), 평균 손익 ${stats.avgPnl >= 0 ? '+' : ''}${Math.round(stats.avgPnl).toLocaleString('ko-KR')}원. 최근 거래: ${recentText}`;
+  return `비용 적용 후 청산 ${stats.count}건(부분 청산 포함) 중 ${stats.wins}승 ${stats.count - stats.wins}패 (승률 ${stats.winRate.toFixed(0)}%), 평균 비용 차감 순손익 ${stats.avgPnl >= 0 ? '+' : ''}${Math.round(stats.avgPnl).toLocaleString('ko-KR')}원. 최근 거래: ${recentText}`;
 }
 
 // 원래 프론트엔드가 브라우저 로컬 타임존(한국 사용자 기준 KST) 자정에
@@ -222,8 +235,82 @@ function positionPnl(h, currentPrice) {
   return priceDiff * h.qty * KRW_RATE;
 }
 
+function fundingCost(h, now = Date.now()) {
+  if (!h.costStartedAt) return 0;
+  return (h.accruedFundingKrw || 0) + (h.fundingNotionalKrw || 0) * COST_MODEL.fundingRatePer8h *
+    Math.max(0, now - h.costStartedAt) / COST_MODEL.fundingPeriodMs;
+}
+
+function exitCosts(h, price, now = Date.now()) {
+  if (!h.costStartedAt) return { fee: 0, slippage: 0, funding: 0 };
+  const notional = h.qty * price * KRW_RATE;
+  return { fee: notional * COST_MODEL.feeRate, slippage: notional * COST_MODEL.slippageRate,
+    funding: fundingCost(h, now) };
+}
+
 function positionValue(h, currentPrice) {
-  return Math.max(0, h.margin + positionPnl(h, currentPrice));
+  const costs = exitCosts(h, currentPrice);
+  return Math.max(0, h.margin + positionPnl(h, currentPrice) - costs.fee - costs.slippage - costs.funding);
+}
+
+function initializeCostTracking(state) {
+  const now = Date.now();
+  state.performanceTracking ||= {};
+  if (state.costEnabledAt) return;
+  state.costEnabledAt = now;
+  TRADERS.forEach((t) => {
+    const p = state.portfolios[t.id];
+    const initialValue = portfolioValue(p, state.tickers);
+    state.performanceTracking[t.id] = { startedAt: now, initialValue, peakValue: initialValue, maxDrawdownPct: 0 };
+    Object.values(p.holdings).filter((h) => h.qty > 0).forEach((h) => {
+      // 기존 포지션의 과거 진입 비용은 소급 차감하지 않는다.
+      Object.assign(h, { costVersion: 0, costStartedAt: now, accruedFundingKrw: 0,
+        fundingNotionalKrw: h.qty * h.avgPrice * KRW_RATE, entryFeeKrw: 0, entrySlippageKrw: 0 });
+    });
+  });
+}
+
+function trackPerformance(state, tickers) {
+  TRADERS.forEach((t) => {
+    const tracking = state.performanceTracking?.[t.id];
+    if (!tracking) return;
+    const value = portfolioValue(state.portfolios[t.id], tickers);
+    tracking.peakValue = Math.max(tracking.peakValue, value);
+    const drawdown = tracking.peakValue > 0 ? (tracking.peakValue - value) / tracking.peakValue * 100 : 0;
+    tracking.maxDrawdownPct = Math.max(tracking.maxDrawdownPct, drawdown);
+  });
+}
+
+function closePosition(state, traderId, symbol, price, fraction, reason, auto) {
+  const p = state.portfolios[traderId];
+  const h = p.holdings[symbol];
+  const now = Date.now();
+  const part = { ...h, qty: h.qty * fraction, margin: h.margin * fraction,
+    fundingNotionalKrw: (h.fundingNotionalKrw || 0) * fraction,
+    accruedFundingKrw: (h.accruedFundingKrw || 0) * fraction };
+  const grossPnl = positionPnl(part, price);
+  const costs = exitCosts(part, price, now);
+  const entryFeeKrw = (h.entryFeeKrw || 0) * fraction;
+  const entrySlippageKrw = (h.entrySlippageKrw || 0) * fraction;
+  const proceeds = Math.max(0, part.margin + grossPnl - costs.fee - costs.slippage - costs.funding);
+  const netPnl = proceeds - part.margin - entryFeeKrw - entrySlippageKrw;
+  const totalCosts = entryFeeKrw + entrySlippageKrw + costs.fee + costs.slippage + costs.funding;
+  const pnlPct = ((price - h.avgPrice) / h.avgPrice) * 100 * (h.side === 'short' ? -1 : 1);
+  p.cash += proceeds;
+  p.holdings[symbol] = { ...h, qty: h.qty * (1 - fraction), margin: h.margin * (1 - fraction),
+    entryFeeKrw: (h.entryFeeKrw || 0) * (1 - fraction),
+    entrySlippageKrw: (h.entrySlippageKrw || 0) * (1 - fraction),
+    accruedFundingKrw: (h.accruedFundingKrw || 0) * (1 - fraction),
+    fundingNotionalKrw: (h.fundingNotionalKrw || 0) * (1 - fraction) };
+  recordClosedTrade(state, traderId, { symbol, side: h.side, pnl: netPnl, grossPnl, pnlPct,
+    totalCosts, entryFeeKrw, entrySlippageKrw, exitFeeKrw: costs.fee, exitSlippageKrw: costs.slippage,
+    fundingKrw: costs.funding, costVersion: h.costVersion ?? 0, marginKrw: part.margin,
+    qty: part.qty, entryPrice: h.avgPrice, exitPrice: price, openedAt: h.openedAt || null,
+    heldMs: h.openedAt ? now - h.openedAt : null, entryReason: h.entryReason || null,
+    entrySignals: h.entrySignals || null, entryLegs: h.entryLegs || [], exitReason: reason,
+    partial: fraction < 1, ts: now });
+  state.tradeLog.push({ traderId, action: 'sell', symbol, reason, auto, ts: now,
+    netPnl, grossPnl, totalCosts });
 }
 
 function portfolioValue(portfolio, tickers) {
@@ -259,22 +346,8 @@ function closeOpenPositionsOnGoalHit(state, tickers) {
       const tk = tickers[symbol];
       if (!tk) return;
       const price = Number(tk.lastPrice);
-      const value = positionValue(h, price);
-      const realizedPnl = positionPnl(h, price);
-      const priceChangePct = ((price - h.avgPrice) / h.avgPrice) * 100;
-      const pnlPct = h.side === 'short' ? -priceChangePct : priceChangePct;
-      const sideLabel = h.side === 'short' ? '숏' : '롱';
-      p.cash += value;
-      p.holdings[symbol] = { qty: 0, avgPrice: h.avgPrice, margin: 0, side: h.side, peakPnlPct: 0, openedAt: null };
-      state.tradeLog.push({
-        traderId: t.id,
-        action: 'sell',
-        symbol,
-        reason: `오늘 목표(+${t.dailyTargetPct}%) 달성으로 전량 매도 후 매매 종료 (${sideLabel})`,
-        auto: true,
-        ts: Date.now(),
-      });
-      recordClosedTrade(state, t.id, { symbol, pnl: realizedPnl, pnlPct, ts: Date.now() });
+      closePosition(state, t.id, symbol, price, 1,
+        `오늘 목표(+${t.dailyTargetPct}%) 달성으로 전량 청산 후 매매 종료`, true);
     });
   });
 }
@@ -353,7 +426,7 @@ function todayPct(state, traderId, tickers) {
 
 function goalReached(state, traderId, tickers) {
   const trader = TRADERS.find((t) => t.id === traderId);
-  return todayPct(state, traderId, tickers) >= trader.dailyTargetPct;
+  return !!state.dailyBase[traderId]?.hitTarget || todayPct(state, traderId, tickers) >= trader.dailyTargetPct;
 }
 
 async function fetchTickers() {
@@ -430,11 +503,7 @@ function checkStopLossAndTakeProfit(state, tickers) {
         triggered = `장시간 방향성 없어 자동 정리 (${sideLabel}, ${(heldMs / 3600000).toFixed(1)}시간 보유, 손익 ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%)`;
       }
       if (triggered) {
-        const realizedPnl = positionPnl(h, price);
-        p.cash += value;
-        p.holdings[symbol] = { qty: 0, avgPrice: h.avgPrice, margin: 0, side: h.side, peakPnlPct: 0, openedAt: null };
-        state.tradeLog.push({ traderId: t.id, action: 'sell', symbol, reason: triggered, auto: true, ts: Date.now() });
-        recordClosedTrade(state, t.id, { symbol, pnl: realizedPnl, pnlPct, ts: Date.now() });
+        closePosition(state, t.id, symbol, price, 1, triggered, true);
       }
     });
   });
@@ -486,13 +555,22 @@ function applyDecision(state, traderId, decision, tickers) {
     const committedMargin = Object.values(p.holdings).reduce((s, h) => s + (h.qty > 0 ? h.margin : 0), 0);
     const maxAllowedMargin = totalValue * (MAX_TOTAL_EXPOSURE_PCT / 100);
     const room = Math.max(0, maxAllowedMargin - committedMargin);
-    const cappedAmount = Math.min(amountKrw, room);
+    const costRateOnMargin = trader.leverage * (COST_MODEL.feeRate + COST_MODEL.slippageRate);
+    const cappedAmount = Math.min(amountKrw, room, p.cash / (1 + costRateOnMargin));
     if (t && !blocked && cappedAmount > 0 && p.cash >= cappedAmount) {
       const price = Number(t.lastPrice);
       const margin = cappedAmount;
       const notional = margin * trader.leverage;
       const qty = notional / (price * KRW_RATE);
       const base = prev && prev.qty > 0 ? prev : { qty: 0, avgPrice: price, margin: 0, side, peakPnlPct: 0, openedAt: Date.now() };
+      const entryFeeKrw = notional * COST_MODEL.feeRate;
+      const entrySlippageKrw = notional * COST_MODEL.slippageRate;
+      const now = Date.now();
+      const rsi = describeRSI(state, symbol);
+      const signals = { trend: describeTrend(state, symbol), rsi: rsi?.value ?? null,
+        volume: describeVolume(state, symbol) };
+      const leg = { ts: now, price, qty, marginKrw: margin, notionalKrw: notional,
+        feeKrw: entryFeeKrw, slippageKrw: entrySlippageKrw, reason, signals };
       const newQty = base.qty + qty;
       const newAvgPrice = (base.qty * base.avgPrice + qty * price) / newQty;
       p.holdings[symbol] = {
@@ -501,15 +579,25 @@ function applyDecision(state, traderId, decision, tickers) {
         margin: base.margin + margin,
         side,
         peakPnlPct: base.peakPnlPct || 0,
-        openedAt: base.openedAt || Date.now(),
+        openedAt: base.openedAt || now,
+        costVersion: base.qty > 0 ? (base.costVersion ?? 0) : COST_MODEL.version,
+        costStartedAt: now, accruedFundingKrw: fundingCost(base, now),
+        fundingNotionalKrw: (base.fundingNotionalKrw || 0) + notional,
+        entryFeeKrw: (base.entryFeeKrw || 0) + entryFeeKrw,
+        entrySlippageKrw: (base.entrySlippageKrw || 0) + entrySlippageKrw,
+        entryReason: base.entryReason || reason, entrySignals: base.entrySignals || signals,
+        entryLegs: [...(base.entryLegs || []), leg].slice(-30),
       };
-      p.cash -= margin;
+      p.cash -= margin + entryFeeKrw + entrySlippageKrw;
+      decision.marginKrw = margin;
+      decision.notionalKrw = notional;
+      decision.entryCostsKrw = entryFeeKrw + entrySlippageKrw;
       if (cappedAmount < amountKrw) {
         decision.reason = `${reason} [전체 노출 한도(${MAX_TOTAL_EXPOSURE_PCT}%)로 증거금 ${amountKrw.toLocaleString('ko-KR')}→${Math.round(cappedAmount).toLocaleString('ko-KR')}원 축소]`;
       }
-    } else if (t && !blocked && cappedAmount <= 0) {
+    } else {
       decision.action = 'hold';
-      decision.reason = `${reason} [전체 노출 한도(${MAX_TOTAL_EXPOSURE_PCT}%) 초과로 진입 보류]`;
+      decision.reason = `${reason} [전체 노출 한도·현금·반대 포지션 확인 후 진입 보류]`;
     }
   } else if (action === 'sell' && symbol) {
     const t = tickers[symbol];
@@ -525,21 +613,20 @@ function applyDecision(state, traderId, decision, tickers) {
         return;
       }
       const fraction = amountKrw ? Math.min(1, amountKrw / prev.margin) : 1;
-      const sellQty = prev.qty * fraction;
-      const releasedMargin = prev.margin * fraction;
-      const pnl = positionPnl({ ...prev, qty: sellQty }, price);
-      const priceChangePct = ((price - prev.avgPrice) / prev.avgPrice) * 100;
-      const pnlPct = prev.side === 'short' ? -priceChangePct : priceChangePct;
-      p.cash += Math.max(0, releasedMargin + pnl);
-      p.holdings[symbol] = { ...prev, qty: prev.qty - sellQty, margin: prev.margin - releasedMargin };
-      recordClosedTrade(state, traderId, { symbol, pnl, pnlPct, ts: Date.now() });
+      closePosition(state, traderId, symbol, price, fraction, reason, !!decision.auto);
+      return;
     }
   }
-  state.tradeLog.push({ traderId, action: decision.action, symbol, reason: decision.reason, auto: !!decision.auto, ts: Date.now() });
+  state.tradeLog.push({ traderId, action: decision.action, symbol, reason: decision.reason, auto: !!decision.auto, ts: Date.now(),
+    marginKrw: decision.marginKrw, notionalKrw: decision.notionalKrw, entryCostsKrw: decision.entryCostsKrw });
 }
 
 const DECISION_SCHEMA_PROMPT = `
-너는 가상 투자 시뮬레이션의 트레이더다. 아래 성격/전략, 레버리지 배율, 현재 보유 자산,
+너는 가상 투자 시뮬레이션의 트레이더다.
+모의 비용은 체결금액 기준 진입/청산 각각 수수료 0.05%, 슬리피지 0.02%,
+보유비용은 8시간당 0.01%를 시간 비례로 차감한다(실제 거래소 요율이 아닌 가정).
+왕복 체결 비용 약 0.14%와 보유비용을 넘길 근거가 없는 미세한 움직임에는 진입하지 마라.
+매매 횟수나 하루 목표보다 비용 차감 후 기대 순손익을 우선해라. 아래 성격/전략, 레버리지 배율, 현재 보유 자산,
 시장 시세를 보고 롱 진입/숏 진입/청산/관망 중 하나를 판단해라.
 
 이 트레이더는 레버리지를 쓴다 -- amountKrw로 적은 금액은 "증거금"이고, 실제 포지션
@@ -731,10 +818,13 @@ function buildStateView(state, tickers) {
       pnl,
       pnlPct,
       todayPct: todayPctVal,
-      goalHit: todayPctVal >= t.dailyTargetPct,
+      goalHit: goalReached(state, t.id, tickers),
       holdings,
       closedTrades: perf.count,
       winRate: perf.count ? Math.round(perf.winRate) : null,
+      performance: perf,
+      costModel: { ...COST_MODEL, enabledAt: state.costEnabledAt },
+      closedTradeHistory: (state.tradeHistory[t.id] || []).slice(-50).reverse(),
       dailyHistory: (state.dailyHistory[t.id] || []).slice().reverse(),
     };
   });
@@ -776,6 +866,8 @@ export class TraderEngine {
       tradeHistory: { ...base.tradeHistory, ...raw.tradeHistory },
       dailyHistory: { ...base.dailyHistory, ...raw.dailyHistory },
       priceHistory: raw.priceHistory || {},
+      performanceTracking: raw.performanceTracking || {},
+      costEnabledAt: raw.costEnabledAt || null,
       lastCycleAt: raw.lastCycleAt || null,
     };
   }
@@ -787,6 +879,7 @@ export class TraderEngine {
 
   async runCycle(auto) {
     const state = await this.loadState();
+    initializeCostTracking(state);
     const tickers = await fetchTickers();
     state.tickers = tickers;
     await updatePriceHistory(state);
@@ -800,6 +893,7 @@ export class TraderEngine {
     const results = await Promise.all(
       TRADERS.map((t) => runTraderDecision(this.env, state, tickers, t.id, auto))
     );
+    trackPerformance(state, tickers);
     state.lastCycleAt = Date.now();
     await this.saveState(state);
     return { state, tickers, results };
@@ -833,6 +927,7 @@ export class TraderEngine {
         return json({ error: 'traderId가 올바르지 않습니다' }, 400);
       }
       const state = await this.loadState();
+      initializeCostTracking(state);
       const tickers = await fetchTickers();
       state.tickers = tickers;
       await updatePriceHistory(state);
@@ -841,6 +936,7 @@ export class TraderEngine {
       checkStopLossAndTakeProfit(state, tickers);
       closeOpenPositionsOnGoalHit(state, tickers);
       const result = await runTraderDecision(this.env, state, tickers, traderId, false);
+      trackPerformance(state, tickers);
       state.lastCycleAt = Date.now();
       await this.saveState(state);
       return json({ result, view: buildStateView(state, tickers) });

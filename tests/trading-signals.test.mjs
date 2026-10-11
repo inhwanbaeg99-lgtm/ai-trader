@@ -70,3 +70,72 @@ test('invalid amounts and unsupported symbols cannot affect holdings', () => {
   assert.throws(() => run("applyDecision(state,'A',{action:'sell',symbol:'BTCUSDT',amountKrw:-1,reason:'test'},tickers)"));
   assert.throws(() => run("applyDecision(state,'A',{action:'buy',symbol:'FAKE',amountKrw:100,reason:'test'},tickers)"));
 });
+
+function freshPosition(side = 'buy', cash = 10000000) {
+  run(`globalThis.state=defaultState(); state.priceHistory.BTCUSDT=candles;
+    globalThis.tickers={BTCUSDT:{lastPrice:100}};
+    state.tickers=tickers; state.portfolios.A.cash=${cash}; initializeCostTracking(state);
+    applyDecision(state,'A',{action:'${side}',symbol:'BTCUSDT',amountKrw:1000000,reason:'signal'},tickers);`);
+}
+const near = (actual, expected) => assert.ok(Math.abs(actual - expected) < 0.0001, `${actual} != ${expected}`);
+test('flat long and short round trips lose modeled costs and reconcile cash exactly', () => {
+  for (const side of ['buy','short']) {
+    freshPosition(side);
+    near(run('state.portfolios.A.cash'), 8996500);
+    run("closePosition(state,'A','BTCUSDT',100,1,'test',true)");
+    const trade = run('state.tradeHistory.A.at(-1)');
+    near(trade.grossPnl, 0);
+    near(trade.pnl, -trade.totalCosts);
+    near(run('state.portfolios.A.cash') - 10000000, trade.pnl);
+    assert.equal(trade.costVersion, 1);
+    assert.equal(trade.entryReason, 'signal');
+    assert.equal(trade.entryLegs.length, 1);
+  }
+});
+test('partial exits allocate entry costs without double charging and preserve remaining metadata', () => {
+  freshPosition();
+  run("closePosition(state,'A','BTCUSDT',101,0.4,'partial',true); closePosition(state,'A','BTCUSDT',101,1,'rest',true)");
+  const trades = run('state.tradeHistory.A');
+  near(trades.reduce((sum,t)=>sum+t.entryFeeKrw,0),2500);
+  near(trades.reduce((sum,t)=>sum+t.entrySlippageKrw,0),1000);
+  near(trades.reduce((sum,t)=>sum+t.pnl,0),run('state.portfolios.A.cash')-10000000);
+});
+test('funding accrues with holding time and an add-on does not reset existing accrual', () => {
+  freshPosition();
+  run('state.portfolios.A.holdings.BTCUSDT.costStartedAt=Date.now()-COST_MODEL.fundingPeriodMs');
+  near(run('fundingCost(state.portfolios.A.holdings.BTCUSDT)'),500);
+  run("applyDecision(state,'A',{action:'buy',symbol:'BTCUSDT',amountKrw:1000000,reason:'add'},tickers)");
+  assert.ok(run('fundingCost(state.portfolios.A.holdings.BTCUSDT)') >= 500);
+  near(run('state.portfolios.A.holdings.BTCUSDT.fundingNotionalKrw'),10000000);
+  assert.equal(run('state.portfolios.A.holdings.BTCUSDT.entryLegs.length'),2);
+});
+test('legacy migration is idempotent and does not retroactively charge entry costs', () => {
+  setup();
+  run('state.tickers=tickers; initializeCostTracking(state)');
+  const cash = run('state.portfolios.A.cash');
+  const started = run('state.portfolios.A.holdings.BTCUSDT.costStartedAt');
+  run('initializeCostTracking(state)');
+  assert.equal(run('state.portfolios.A.cash'),cash);
+  assert.equal(run('state.portfolios.A.holdings.BTCUSDT.costStartedAt'),started);
+  run("closePosition(state,'A','BTCUSDT',100,1,'legacy',true)");
+  assert.equal(run('state.tradeHistory.A.at(-1).entryFeeKrw'),0);
+  assert.equal(run('computePerformanceStats(state,"A").count'),0);
+  assert.equal(run('computePerformanceStats(state,"A").legacyCount'),1);
+});
+test('fees are included in cash constraints, and forced liquidation cannot produce negative cash', () => {
+  freshPosition('buy',100000);
+  assert.ok(run('state.portfolios.A.cash') >= -0.000001);
+  run("closePosition(state,'A','BTCUSDT',1,1,'liquidated',true)");
+  assert.ok(run('state.portfolios.A.cash') >= -0.000001);
+});
+test('net liquidation value includes exit costs; drawdown tracks losses after initialization', () => {
+  freshPosition();
+  assert.ok(run('portfolioValue(state.portfolios.A,tickers)') < 10000000);
+  run('trackPerformance(state,tickers)');
+  assert.ok(run('computePerformanceStats(state,"A").maxDrawdownPct') > 0);
+});
+test('a reached daily target remains locked after close costs reduce the final return', () => {
+  freshPosition();
+  run('state.dailyBase.A={value:10000000,hitTarget:true}; state.portfolios.A.holdings.BTCUSDT.qty=0');
+  assert.equal(run('goalReached(state,"A",tickers)'),true);
+});

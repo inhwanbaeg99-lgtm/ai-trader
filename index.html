@@ -392,6 +392,17 @@
     color: var(--ink-sub);
     font-size: 13px;
   }
+  .performance-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .performance-metric { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+  .performance-metric span { display: block; color: var(--ink-sub); font-size: 12px; margin-bottom: 5px; }
+  .performance-metric strong { font-size: 17px; }
+  .cost-note { color: var(--ink-sub); font-size: 12px; line-height: 1.6; margin: 12px 0 20px; }
+  .trade-detail { font-size: 12px; line-height: 1.6; color: var(--ink-sub); overflow-wrap: anywhere; }
+  .trade-detail summary { cursor: pointer; color: var(--ink); }
+  .trade-detail p { margin: 8px 0 0; }
+  .trade-net { font-size: 14px; font-weight: 800; }
+  .trade-net.up { color: var(--up); }
+  .trade-net.down { color: var(--down); }
 </style>
 </head>
 <body>
@@ -424,6 +435,13 @@
         <div class="trader-badge" id="detailBadge"></div>
       </div>
       <div class="detail-sub" id="detailSub"></div>
+      <div class="section-title">비용 차감 후 매매 성과</div>
+      <div class="performance-grid" id="performanceGrid"></div>
+      <div class="cost-note" id="costModelNote"></div>
+      <div class="section-title">종목·방향별 순손익</div>
+      <div class="day-list" id="performanceGroups"></div>
+      <div class="section-title">청산 상세 기록 (최근 50건)</div>
+      <div class="day-list" id="closedTradeList"></div>
       <div class="section-title">달성 기록 (KST 자정 기준)</div>
       <div class="day-list" id="dayList"></div>
     </div>
@@ -555,6 +573,55 @@
 
   let openTraderId = null;
 
+  function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  function renderPerformance(t) {
+    const perf = t.performance;
+    const metrics = document.getElementById('performanceGrid');
+    const groups = document.getElementById('performanceGroups');
+    const history = document.getElementById('closedTradeList');
+    if (!perf || !t.costModel?.enabledAt) {
+      metrics.innerHTML = '<div class="empty-day-list">비용 적용 후 기록을 준비하고 있어요.</div>';
+      document.getElementById('costModelNote').textContent = '';
+      groups.innerHTML = '';
+      history.innerHTML = '';
+      return;
+    }
+    const values = [
+      ['청산 순손익', fmtWon(perf.totalPnl)],
+      ['청산 1건 평균 순손익', perf.count ? fmtWon(perf.avgPnl) : '기록 없음'],
+      ['비용 차감 후 승률', perf.count ? `${perf.winRate.toFixed(1)}% (${perf.count}건)` : '기록 없음'],
+      ['최대 낙폭', `${perf.maxDrawdownPct.toFixed(2)}%`],
+      ['청산 거래 총 비용', fmtWon(perf.totalCosts)],
+      ['집계 범위', '신규 포지션 · 최근 1,000건'],
+    ];
+    metrics.innerHTML = values.map(([label, value]) => `<div class="performance-metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join('');
+    const model = t.costModel;
+    const started = new Date(model.enabledAt).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' });
+    document.getElementById('costModelNote').textContent = `모의 비용 가정: 진입·청산 각각 체결금액의 수수료 ${(model.feeRate * 100).toFixed(2)}%, 슬리피지 ${(model.slippageRate * 100).toFixed(2)}%. 펀딩은 방향과 무관하게 8시간당 ${(model.fundingRatePer8h * 100).toFixed(2)}%를 보유 시간에 비례해 비용으로 차감합니다. 실제 거래소 요율·펀딩 정산과는 다릅니다. ${started} KST부터 적용. 기존 포지션에는 과거 진입 비용을 소급 적용하지 않으며, 신규 포지션 성과 집계에서 제외합니다. 부분 청산은 각각 1건이며 최대 낙폭은 적용 후 3분 주기 평가액 기준입니다.`;
+    groups.innerHTML = perf.groups.length ? perf.groups.map((g) => `<div class="day-row"><div class="day-row-top"><span class="day-date">${escapeHtml(g.symbol.replace('USDT', ''))} ${g.side === 'short' ? '숏' : '롱'} · ${g.count}건</span><span class="trade-net ${g.netPnl >= 0 ? 'up' : 'down'}">${escapeHtml(fmtWon(g.netPnl))}</span></div></div>`).join('') : '<div class="empty-day-list">신규 포지션이 청산되면 비교 기록이 쌓여요.</div>';
+    history.innerHTML = (t.closedTradeHistory || []).length ? t.closedTradeHistory.map((h) => {
+      const measured = h.costVersion === model.version;
+      const detailed = typeof h.totalCosts === 'number';
+      const date = new Date(h.ts).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' });
+      const held = h.heldMs == null ? '미기록' : `${Math.round(h.heldMs / 60000)}분`;
+      return `<div class="day-row">
+        <div class="day-row-top"><span class="day-date">${escapeHtml(h.symbol.replace('USDT', ''))} ${h.side ? h.side === 'short' ? '숏' : '롱' : ''}${h.partial ? ' · 부분 청산' : ''}</span><span class="trade-net ${h.pnl >= 0 ? 'up' : 'down'}">${escapeHtml(fmtWon(h.pnl))}</span></div>
+        <div class="day-pct">${escapeHtml(date)} KST · ${measured ? '비용 차감 순손익' : detailed ? '기존 포지션 · 적용 후 비용만 차감' : '이전 기록 · 비용 미반영'} · 보유 ${held}</div>
+        ${detailed ? `<details class="trade-detail"><summary>진입 근거와 비용 상세</summary>
+          <p>진입 ${escapeHtml(h.entryPrice)} → 청산 ${escapeHtml(h.exitPrice)} USDT · 청산 증거금 ${escapeHtml(fmtWon(h.marginKrw))}</p>
+          <p>비용 전 손익 ${escapeHtml(fmtWon(h.grossPnl))} · 수수료 ${escapeHtml(fmtWon(h.entryFeeKrw + h.exitFeeKrw))} · 슬리피지 ${escapeHtml(fmtWon(h.entrySlippageKrw + h.exitSlippageKrw))} · 펀딩 가정 ${escapeHtml(fmtWon(h.fundingKrw))}</p>
+          <p>진입: ${escapeHtml(h.entryReason || '이전 포지션 · 근거 미기록')}</p>
+          <p>진입 신호: ${escapeHtml(h.entrySignals ? `${h.entrySignals.trend} / RSI ${h.entrySignals.rsi ?? '없음'} / ${h.entrySignals.volume}` : '미기록')}</p>
+          ${(h.entryLegs || []).map((leg) => `<p>진입·추가 진입 ${escapeHtml(new Date(leg.ts).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' }))} · 증거금 ${escapeHtml(fmtWon(leg.marginKrw))} · ${escapeHtml(leg.reason)}</p>`).join('')}
+          <p>청산: ${escapeHtml(h.exitReason)}</p>
+        </details>` : ''}
+      </div>`;
+    }).join('') : '<div class="empty-day-list">청산된 거래가 아직 없어요.</div>';
+  }
+
   function renderDetail() {
     const t = latestTraders.find((x) => x.id === openTraderId);
     if (!t) return;
@@ -563,6 +630,7 @@
     detailBadgeEl.textContent = t.badge;
     detailBadgeEl.style.display = t.badge ? '' : 'none';
     document.getElementById('detailSub').textContent = t.desc;
+    renderPerformance(t);
     const dayListEl = document.getElementById('dayList');
     if (!t.dailyHistory.length) {
       dayListEl.innerHTML = '<div class="empty-day-list">아직 마감된 날이 없어요. 한국시간 자정이 지나면 그날 기록이 여기 쌓여요.</div>';
