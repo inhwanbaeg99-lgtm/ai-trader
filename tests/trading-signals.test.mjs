@@ -177,3 +177,29 @@ test('cost ledger can be restored from closed records without counting costs twi
   near(run('paidTradingCosts(state,"A")'),paid);
   assert.equal(run('state.dailyBase.A.paidCostsKrw'),0);
 });
+
+test('entry classification uses numeric trend, RSI and volume and respects position direction', () => {
+  run('globalThis.signalState={priceHistory:{BTCUSDT:Array.from({length:20},(_,i)=>({price:100+i,volume:i===19?50:10}))}}');
+  assert.equal(run("classifyEntrySignals(signalState,'BTCUSDT','long').tags[0].key"),'trend:trend_following');
+  assert.equal(run("classifyEntrySignals(signalState,'BTCUSDT','short').tags[0].key"),'trend:counter_trend');
+  assert.equal(run("classifyEntrySignals(signalState,'BTCUSDT','long').tags[1].key"),'rsi:overbought');
+  assert.equal(run("classifyEntrySignals(signalState,'BTCUSDT','long').tags[2].key"),'volume:high');
+});
+test('signal outcomes count one completed position and sum partial exits', () => {
+  freshPosition();
+  run("closePosition(state,'A','BTCUSDT',101,0.5,'partial',true)");
+  assert.equal(run('computePerformanceStats(state,"A").signalPerformance.completedPositions'),0);
+  run("closePosition(state,'A','BTCUSDT',102,1,'rest',true)");
+  const result=run('computePerformanceStats(state,"A").signalPerformance');
+  assert.equal(result.completedPositions,1);
+  assert.equal(result.groups.length,4);
+  for(const g of result.groups) {
+    assert.equal(g.count,1);
+    assert.equal(g.winRate,100);
+    near(g.netPnl,run('state.tradeHistory.A.reduce((sum,h)=>sum+h.pnl,0)'));
+    assert.equal(g.sampleStatus,'collecting');
+  }
+});
+test('unclassified legacy trades do not contaminate signal samples', () => {
+  assert.equal(run('computeSignalPerformance([{pnl:100,marginKrw:1000,partial:false}]).completedPositions'),0);
+});

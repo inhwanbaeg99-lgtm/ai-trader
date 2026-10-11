@@ -195,6 +195,58 @@ function recordClosedTrade(state, traderId, entry) {
   if (hist.length > TRADE_HISTORY_LIMIT) hist.splice(0, hist.length - TRADE_HISTORY_LIMIT);
 }
 
+// 최초 진입 시점의 수치로 신호를 분류한다. AI 설명 문장을 다시 해석하지 않는다.
+function classifyEntrySignals(state, symbol, side) {
+  const hist = state.priceHistory[symbol] || [];
+  const first = hist[0]?.price;
+  const last = hist.at(-1)?.price;
+  const changePct = first > 0 ? (last - first) / first * 100 : 0;
+  const direction = Math.abs(changePct) < 0.1 ? 'flat' : changePct > 0 ? 'up' : 'down';
+  const aligned = side === 'short' ? direction === 'down' : direction === 'up';
+  const setup = direction === 'flat' ? 'range' : aligned ? 'trend_following' : 'counter_trend';
+  const rsi = describeRSI(state, symbol)?.value ?? null;
+  const rsiBand = rsi === null ? 'unknown' : rsi >= 70 ? 'overbought' : rsi <= 30 ? 'oversold' : 'neutral';
+  const baseline = hist.slice(0, -1);
+  const avgVolume = baseline.length ? baseline.reduce((sum, h) => sum + h.volume, 0) / baseline.length : 0;
+  const volumeRatio = avgVolume > 0 ? hist.at(-1).volume / avgVolume : null;
+  const volumeBand = volumeRatio === null ? 'unknown' : volumeRatio >= 1.5 ? 'high' : volumeRatio <= 0.5 ? 'low' : 'normal';
+  const setupLabels = { range: '횡보 구간 진입', trend_following: '추세 동행', counter_trend: '추세 반대 진입' };
+  const rsiLabels = { overbought: 'RSI 과매수', oversold: 'RSI 과매도', neutral: 'RSI 중립', unknown: 'RSI 미확인' };
+  const volumeLabels = { high: '거래량 급증', low: '거래량 저조', normal: '거래량 평이', unknown: '거래량 미확인' };
+  return { signalVersion: 1, trend: describeTrend(state, symbol), rsi, volume: describeVolume(state, symbol),
+    direction, changePct, volumeRatio, setupId: `${setup}:${rsiBand}:${volumeBand}`,
+    tags: [{ key: `trend:${setup}`, label: setupLabels[setup] },
+      { key: `rsi:${rsiBand}`, label: rsiLabels[rsiBand] },
+      { key: `volume:${volumeBand}`, label: volumeLabels[volumeBand] }] };
+}
+
+function computeSignalPerformance(hist) {
+  const positions = new Map();
+  for (const h of hist) {
+    if (h.entrySignals?.signalVersion !== 1 || !h.positionId) continue;
+    const p = positions.get(h.positionId) || { signals: h.entrySignals, netPnl: 0, margin: 0, complete: false };
+    p.netPnl += h.pnl;
+    p.margin += h.marginKrw;
+    p.complete ||= h.partial === false;
+    positions.set(h.positionId, p);
+  }
+  const complete = [...positions.values()].filter((p) => p.complete && p.margin > 0);
+  const groups = new Map();
+  for (const p of complete) {
+    const tags = [...p.signals.tags, { key: `combo:${p.signals.setupId}`, label: p.signals.tags.map((t) => t.label).join(' · ') }];
+    for (const tag of tags) {
+      const row = groups.get(tag.key) || { key: tag.key, label: tag.label, count: 0, wins: 0, netPnl: 0, sumReturnPct: 0 };
+      row.count++; row.wins += p.netPnl > 0 ? 1 : 0; row.netPnl += p.netPnl;
+      row.sumReturnPct += p.netPnl / p.margin * 100;
+      groups.set(tag.key, row);
+    }
+  }
+  return { completedPositions: complete.length, groups: [...groups.values()].map((g) => ({
+    key: g.key, label: g.label, count: g.count, wins: g.wins, winRate: g.wins / g.count * 100,
+    netPnl: g.netPnl, avgPnl: g.netPnl / g.count, avgReturnPct: g.sumReturnPct / g.count,
+    sampleStatus: g.count >= 20 ? 'comparison_available' : 'collecting' })) };
+}
+
 function computePerformanceStats(state, traderId) {
   const all = state.tradeHistory[traderId] || [];
   const hist = all.filter((h) => h.costVersion === COST_MODEL.version);
@@ -211,6 +263,7 @@ function computePerformanceStats(state, traderId) {
   return { count: hist.length, wins, winRate: hist.length ? wins / hist.length * 100 : 0,
     avgPnl: hist.length ? totalPnl / hist.length : 0, totalPnl, totalCosts,
     legacyCount: all.length - hist.length, recent: hist.slice(-5), groups: Object.values(grouped),
+    signalPerformance: computeSignalPerformance(hist),
     maxDrawdownPct: state.performanceTracking?.[traderId]?.maxDrawdownPct || 0 };
 }
 
@@ -220,7 +273,9 @@ function buildPerformanceSummary(state, traderId) {
   const recentText = stats.recent
     .map((h) => `${h.symbol.replace('USDT', '')} ${h.pnl >= 0 ? '+' : ''}${Math.round(h.pnl).toLocaleString('ko-KR')}원`)
     .join(', ');
-  return `비용 적용 후 청산 ${stats.count}건(부분 청산 포함) 중 ${stats.wins}승 ${stats.count - stats.wins}패 (승률 ${stats.winRate.toFixed(0)}%), 평균 비용 차감 순손익 ${stats.avgPnl >= 0 ? '+' : ''}${Math.round(stats.avgPnl).toLocaleString('ko-KR')}원. 최근 거래: ${recentText}`;
+  const signalText = stats.signalPerformance.groups.filter((g) => g.key.startsWith('combo:') && g.count >= 20)
+    .map((g) => `${g.label}: 완전 청산 ${g.count}회, 승률 ${g.winRate.toFixed(1)}%, 평균 순손익 ${Math.round(g.avgPnl)}원, 증거금 대비 평균 순수익률 ${g.avgReturnPct.toFixed(2)}%`).join('; ');
+  return `비용 적용 후 청산 ${stats.count}건(부분 청산 포함) 중 ${stats.wins}승 ${stats.count - stats.wins}패 (승률 ${stats.winRate.toFixed(0)}%), 평균 비용 차감 순손익 ${stats.avgPnl >= 0 ? '+' : ''}${Math.round(stats.avgPnl).toLocaleString('ko-KR')}원. 최근 거래: ${recentText}. 신호별 참고 통계: ${signalText || '비교 가능한 표본 부족'}. 과거 통계는 미래 승률이 아니다. 표본이 적다고 매매를 중단하거나 확률을 단정하지 마라.`;
 }
 
 // 원래 프론트엔드가 브라우저 로컬 타임존(한국 사용자 기준 KST) 자정에
@@ -306,7 +361,7 @@ function closePosition(state, traderId, symbol, price, fraction, reason, auto) {
   recordClosedTrade(state, traderId, { symbol, side: h.side, pnl: netPnl, grossPnl, pnlPct,
     totalCosts, entryFeeKrw, entrySlippageKrw, exitFeeKrw: costs.fee, exitSlippageKrw: costs.slippage,
     fundingKrw: costs.funding, costVersion: h.costVersion ?? 0, marginKrw: part.margin,
-    qty: part.qty, entryPrice: h.avgPrice, exitPrice: price, openedAt: h.openedAt || null,
+    positionId: h.positionId || null, qty: part.qty, entryPrice: h.avgPrice, exitPrice: price, openedAt: h.openedAt || null,
     heldMs: h.openedAt ? now - h.openedAt : null, entryReason: h.entryReason || null,
     entrySignals: h.entrySignals || null, entryLegs: h.entryLegs || [], exitReason: reason,
     partial: fraction < 1, ts: now });
@@ -625,15 +680,14 @@ function applyDecision(state, traderId, decision, tickers) {
       const entryFeeKrw = notional * COST_MODEL.feeRate;
       const entrySlippageKrw = notional * COST_MODEL.slippageRate;
       const now = Date.now();
-      const rsi = describeRSI(state, symbol);
-      const signals = { trend: describeTrend(state, symbol), rsi: rsi?.value ?? null,
-        volume: describeVolume(state, symbol) };
+      const signals = classifyEntrySignals(state, symbol, side);
       const leg = { ts: now, price, qty, marginKrw: margin, notionalKrw: notional,
         feeKrw: entryFeeKrw, slippageKrw: entrySlippageKrw, reason, signals };
       const newQty = base.qty + qty;
       const newAvgPrice = (base.qty * base.avgPrice + qty * price) / newQty;
       p.paidCostsKrw = paidTradingCosts(state, traderId) + entryFeeKrw + entrySlippageKrw;
       p.holdings[symbol] = {
+        positionId: base.positionId || `${traderId}:${symbol}:${now}`,
         qty: newQty,
         avgPrice: newAvgPrice,
         margin: base.margin + margin,

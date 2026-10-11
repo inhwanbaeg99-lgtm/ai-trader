@@ -440,6 +440,9 @@
       <div class="cost-note" id="costModelNote"></div>
       <div class="section-title">종목·방향별 순손익</div>
       <div class="day-list" id="performanceGroups"></div>
+      <div class="section-title">진입 신호별 성과</div>
+      <div class="cost-note">최초 진입 조건별로 완전히 청산된 포지션을 비교합니다. 부분 청산은 합산하며, 추가 진입도 최초 조건에 포함합니다. 각 신호에 같은 거래가 중복 집계됩니다. 20회 미만은 표본 수집 중이며, 20회를 넘겨도 승률이 검증됐다는 뜻은 아닙니다.</div>
+      <div class="day-list" id="signalPerformance"></div>
       <div class="section-title">청산 상세 기록 (최근 50건)</div>
       <div class="day-list" id="closedTradeList"></div>
       <div class="section-title">달성 기록 (KST 자정 기준)</div>
@@ -586,6 +589,7 @@
       metrics.innerHTML = '<div class="empty-day-list">비용 적용 후 기록을 준비하고 있어요.</div>';
       document.getElementById('costModelNote').textContent = '';
       groups.innerHTML = '';
+      document.getElementById('signalPerformance').innerHTML = '';
       history.innerHTML = '';
       return;
     }
@@ -604,6 +608,11 @@
     const started = new Date(model.enabledAt).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' });
     document.getElementById('costModelNote').textContent = `모의 비용 가정: 진입·청산 각각 체결금액의 수수료 ${(model.feeRate * 100).toFixed(2)}%, 슬리피지 ${(model.slippageRate * 100).toFixed(2)}%. 펀딩은 방향과 무관하게 8시간당 ${(model.fundingRatePer8h * 100).toFixed(2)}%를 보유 시간에 비례해 비용으로 차감합니다. 실제 거래소 요율·펀딩 정산과는 다릅니다. ${started} KST부터 적용. 기존 포지션에는 과거 진입 비용을 소급 적용하지 않으며, 신규 포지션 성과 집계에서 제외합니다. 부분 청산은 각각 1건이며 최대 낙폭은 적용 후 3분 주기 평가액 기준입니다.`;
     groups.innerHTML = perf.groups.length ? perf.groups.map((g) => `<div class="day-row"><div class="day-row-top"><span class="day-date">${escapeHtml(g.symbol.replace('USDT', ''))} ${g.side === 'short' ? '숏' : '롱'} · ${g.count}건</span><span class="trade-net ${g.netPnl >= 0 ? 'up' : 'down'}">${escapeHtml(fmtWon(g.netPnl))}</span></div></div>`).join('') : '<div class="empty-day-list">신규 포지션이 청산되면 비교 기록이 쌓여요.</div>';
+    const signalGroups = perf.signalPerformance?.groups || [];
+    document.getElementById('signalPerformance').innerHTML = signalGroups.length ? signalGroups.map((g) => `<div class="day-row">
+      <div class="day-row-top"><span class="day-date">${escapeHtml(g.label)}</span><span class="trade-net ${g.avgPnl >= 0 ? 'up' : 'down'}">평균 ${escapeHtml(fmtWon(g.avgPnl))}</span></div>
+      <div class="trade-detail">${g.count}회 · 승률 ${g.winRate.toFixed(1)}% · 증거금 대비 평균 순수익률 ${g.avgReturnPct >= 0 ? '+' : ''}${g.avgReturnPct.toFixed(2)}% · ${g.sampleStatus === 'collecting' ? '표본 수집 중' : '비교 통계'}<br>총 순손익 ${escapeHtml(fmtWon(g.netPnl))}</div>
+    </div>`).join('') : '<div class="empty-day-list">새 신호 분류가 적용된 포지션을 완전히 청산하면 기록이 쌓여요.</div>';
     history.innerHTML = (t.closedTradeHistory || []).length ? t.closedTradeHistory.map((h) => {
       const measured = h.costVersion === model.version;
       const detailed = typeof h.totalCosts === 'number';
