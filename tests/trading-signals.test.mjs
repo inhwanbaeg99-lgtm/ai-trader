@@ -203,3 +203,94 @@ test('signal outcomes count one completed position and sum partial exits', () =>
 test('unclassified legacy trades do not contaminate signal samples', () => {
   assert.equal(run('computeSignalPerformance([{pnl:100,marginKrw:1000,partial:false}]).completedPositions'),0);
 });
+
+function frameRows(duration, count = 62, mode = 'up') {
+  const now = Math.floor(Date.now() / duration) * duration;
+  return Array.from({length:count},(_,i)=>{
+    const ts=now-(count-1-i)*duration;
+    const price=mode==='up'?100+i:mode==='down'?200-i:100;
+    return [ts,price,price+0.1,price-0.1,price,10,ts+duration,1000];
+  });
+}
+test('higher timeframe candles exclude active bars and reject gaps or old data',()=>{
+  context.frameRows=frameRows(900000); context.duration=900000;
+  const data=run('buildTimeframeCandles(frameRows,duration)');
+  assert.equal(data.length,60);
+  assert.ok(data.at(-1).ts+900000<=Date.now());
+  assert.throws(()=>run('buildTimeframeCandles(frameRows.filter((_,i)=>i!==50),duration)'));
+  assert.throws(()=>run('buildTimeframeCandles(frameRows.slice(0,-1),duration,Date.now()+duration)'));
+  assert.equal(run('buildTimeframeCandles([...frameRows,frameRows[50]],duration).length'),60);
+});
+test('timeframe classifier distinguishes up/down trends and flat markets',()=>{
+  for(const [mode,regime] of [['up','trend_up'],['down','trend_down'],['flat','range']]) {
+    context.frameRows=frameRows(900000,62,mode);
+    const result=run('analyzeTimeframe(buildTimeframeCandles(frameRows,900000),900000)');
+    assert.equal(result.regime,regime);
+    assert.ok(result.atrPct>0);
+    assert.ok(result.efficiency>=0 && result.efficiency<=1);
+  }
+});
+test('conflicting fifteen-minute and hourly trends remain mixed, not a confident direction',()=>{
+  context.midRows=frameRows(900000,62,'up');context.longRows=frameRows(3600000,62,'down');
+  run("globalThis.multiState={priceHistory:{},timeframeHistory:{BTCUSDT:{'15m':buildTimeframeCandles(midRows,900000),'1h':buildTimeframeCandles(longRows,3600000)}}}");
+  const result=run("analyzeMarket(multiState,'BTCUSDT')");
+  assert.equal(result.contextAvailable,true);
+  assert.equal(result.regime,'transition');
+  context.longRows=frameRows(3600000,62,'up');
+  run("multiState.timeframeHistory.BTCUSDT['1h']=buildTimeframeCandles(longRows,3600000)");
+  assert.equal(run("analyzeMarket(multiState,'BTCUSDT').regime"),'trend_up');
+});
+test('missing or stale higher timeframe data stays unknown without inventing a trend',()=>{
+  run("multiState.timeframeHistory.BTCUSDT['1h']=[]");
+  assert.equal(run("analyzeMarket(multiState,'BTCUSDT').contextAvailable"),false);
+  assert.equal(run("analyzeMarket(multiState,'BTCUSDT').regime"),'unknown');
+  assert.equal(run("analyzeTimeframe(buildTimeframeCandles(midRows,900000),900000,Date.now()+900000).available"),false);
+});
+test('entry snapshots retain multi-timeframe context and aggregate alignment outcomes',()=>{
+  freshPosition();
+  context.midRows=frameRows(900000,62,'up');context.longRows=frameRows(3600000,62,'up');
+  run("state.timeframeHistory={BTCUSDT:{'15m':buildTimeframeCandles(midRows,900000),'1h':buildTimeframeCandles(longRows,3600000)}}; state.tradeHistory.A=[]; state.portfolios.A={cash:10000000,holdings:{}}; applyDecision(state,'A',{action:'short',symbol:'BTCUSDT',amountKrw:1000000,reason:'counter'},tickers); closePosition(state,'A','BTCUSDT',99,1,'exit',true)");
+  assert.equal(run('state.tradeHistory.A[0].entrySignals.marketContext.alignment'),'opposed');
+  const perf=run('computePerformanceStats(state,"A").signalPerformance');
+  assert.equal(perf.completedPositions,1);
+  assert.equal(perf.groups.length,6);
+  assert.ok(perf.groups.some(g=>g.key==='alignment:opposed'));
+});
+test('failed higher-timeframe fetch preserves available short candles and cannot reuse stale context',async()=>{
+  const now=Math.floor(Date.now()/180000)*180000;
+  const minutes=Array.from({length:65},(_,i)=>{
+    const ts=now-(64-i)*60000;return [ts,100,101,99,100,1,ts+60000,100];
+  });
+  context.mockMinutes=minutes;
+  run("globalThis.refreshState={priceHistory:{},timeframeHistory:{}}; globalThis.fetch=async url=>{ if(url.includes('interval=1m&')) return {ok:true,json:async()=>mockMinutes}; throw new Error('unavailable') }");
+  await run('updatePriceHistory(refreshState)');
+  assert.equal(run('refreshState.priceHistory.BTCUSDT.length'),20);
+  assert.equal(run("refreshState.timeframeHistory.BTCUSDT['1h'].length"),0);
+});
+
+test('expanded history storage preserves legacy records and round-trips split snapshots',async()=>{
+  const values=new Map();
+  const storage={
+    async get(keys){return Array.isArray(keys)?new Map(keys.filter(k=>values.has(k)).map(k=>[k,values.get(k)])):values.get(keys)},
+    async put(items){for(const [key,value] of Object.entries(items))values.set(key,value)},
+    async delete(keys){for(const key of keys)values.delete(key)},
+    async transaction(callback){await callback(this)},
+    async getAlarm(){return 1},
+  };
+  context.mockContext={storage,blockConcurrencyWhile:callback=>callback()};
+  run('globalThis.storageEngine=new TraderEngine(mockContext,{})');
+  const legacy=run('defaultState()');
+  legacy.tradeHistory.A=[{symbol:'BTCUSDT',pnl:123,ts:1}];values.set('state',legacy);
+  const loaded=await run('storageEngine.loadState()');
+  assert.equal(loaded.tradeHistory.A[0].pnl,123);
+  const entries=Array.from({length:50},(_,i)=>({symbol:'BTCUSDT',pnl:i,ts:i,reason:'상세'.repeat(2000)}));
+  loaded.tradeHistory.A=entries;context.toSave=loaded;
+  await run('storageEngine.saveState(toSave)');
+  assert.ok(values.get('state').historyChunkKeys.A.length>1);
+  const restored=await run('storageEngine.loadState()');
+  assert.equal(restored.tradeHistory.A.length,50);
+  assert.equal(restored.tradeHistory.A[49].pnl,49);
+  context.toSave.tradeHistory.A=[];
+  await run('storageEngine.saveState(toSave)');
+  assert.equal([...values.keys()].filter(k=>k.startsWith('tradeHistory:')).length,0);
+});

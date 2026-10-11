@@ -65,7 +65,7 @@ function defaultState() {
     tradeHistory[t.id] = [];
     dailyHistory[t.id] = [];
   });
-  return { portfolios, dailyBase, tradeLog: [], tickers: {}, tradeHistory, dailyHistory, priceHistory: {}, performanceTracking: {}, costEnabledAt: null, lastCycleAt: null };
+  return { portfolios, dailyBase, tradeLog: [], tickers: {}, tradeHistory, dailyHistory, priceHistory: {}, timeframeHistory: {}, performanceTracking: {}, costEnabledAt: null, lastCycleAt: null };
 }
 
 // 1분봉 3개를 묶어 완전히 종료된 3분봉만 사용한다.
@@ -79,9 +79,12 @@ function buildClosedCandles(rows, now = Date.now()) {
     const ts = Number(row[0]);
     const price = Number(row[4]);
     const volume = Number(row[7]); // quote asset volume (USDT)
+    const open = Number(row[1]), high = Number(row[2]), low = Number(row[3]);
     if (!Number.isFinite(ts) || ts % 60000 !== 0 || !Number.isFinite(price) || price <= 0 ||
         row[7] == null || !Number.isFinite(volume) || volume < 0 || ts + 60000 > now) continue;
-    minutes.set(ts, { price, volume });
+    if (![open, high, low].every((v) => Number.isFinite(v) && v > 0) ||
+        high < Math.max(open, price) || low > Math.min(open, price)) continue;
+    minutes.set(ts, { price, volume, open, high, low });
   }
   const groups = new Map();
   for (const [ts, candle] of minutes) {
@@ -93,7 +96,8 @@ function buildClosedCandles(rows, now = Date.now()) {
   for (const [ts, group] of [...groups].sort((a, b) => a[0] - b[0])) {
     group.sort((a, b) => a.ts - b.ts);
     if (group.length !== 3 || group[0].ts !== ts || group[2].ts !== ts + 120000 || ts + CANDLE_MS > now) continue;
-    candles.push({ ts, price: group[2].price, volume: group.reduce((sum, c) => sum + c.volume, 0) });
+    candles.push({ ts, price: group[2].price, volume: group.reduce((sum, c) => sum + c.volume, 0),
+      open: group[0].open, high: Math.max(...group.map((c) => c.high)), low: Math.min(...group.map((c) => c.low)) });
   }
   const recent = candles.slice(-PRICE_HISTORY_LIMIT);
   if (recent.length < PRICE_HISTORY_LIMIT || now - (recent.at(-1).ts + CANDLE_MS) >= CANDLE_MS ||
@@ -103,21 +107,109 @@ function buildClosedCandles(rows, now = Date.now()) {
   return recent;
 }
 
-async function updatePriceHistory(state) {
-  const results = await Promise.allSettled(SYMBOLS.map(async (symbol) => {
-    const res = await fetch(`https://api.mexc.com/api/v3/klines?symbol=${symbol}&interval=1m&limit=65`, {
-      signal: AbortSignal.timeout(10000),
-    });
-    if (!res.ok) throw new Error(`캔들 조회 실패: ${res.status}`);
-    const rows = await res.json();
-    if (!Array.isArray(rows)) throw new Error('잘못된 캔들 응답');
-    return buildClosedCandles(rows);
-  }));
-  state.priceHistory = {};
-  results.forEach((result, i) => {
-    // 실패한 종목은 이전 지표를 재사용하지 않는다. 기존 포지션 손절은 시세로 계속 처리한다.
-    state.priceHistory[SYMBOLS[i]] = result.status === 'fulfilled' ? result.value : [];
+const TIMEFRAME_CONFIG = { '15m': { interval: '15m', durationMs: 15 * 60 * 1000 },
+  '1h': { interval: '60m', durationMs: 60 * 60 * 1000 } };
+const CONTEXT_HISTORY_LIMIT = 60;
+
+function buildTimeframeCandles(rows, durationMs, now = Date.now()) {
+  const byTime = new Map();
+  for (const row of rows) {
+    const [ts, open, high, low, price, , , volume] = row.map(Number);
+    if (!Number.isFinite(ts) || ts % durationMs !== 0 || ts + durationMs > now ||
+        ![open, high, low, price].every((v) => Number.isFinite(v) && v > 0) ||
+        high < Math.max(open, price) || low > Math.min(open, price) || row[7] == null ||
+        !Number.isFinite(volume) || volume < 0) continue;
+    byTime.set(ts, { ts, open, high, low, price, volume });
+  }
+  const hist = [...byTime.values()].sort((a, b) => a.ts - b.ts).slice(-CONTEXT_HISTORY_LIMIT);
+  if (hist.length !== CONTEXT_HISTORY_LIMIT || now - (hist.at(-1).ts + durationMs) >= durationMs ||
+      hist.some((c, i) => i > 0 && c.ts - hist[i - 1].ts !== durationMs)) {
+    throw new Error('상위 시간대 완료 캔들 부족 또는 지연');
+  }
+  return hist;
+}
+
+async function fetchCandleRows(symbol, interval, limit) {
+  const res = await fetch(`https://api.mexc.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`, {
+    signal: AbortSignal.timeout(10000),
   });
+  if (!res.ok) throw new Error(`캔들 조회 실패: ${res.status}`);
+  const rows = await res.json();
+  if (!Array.isArray(rows)) throw new Error('잘못된 캔들 응답');
+  return rows;
+}
+
+async function updatePriceHistory(state) {
+  const now = Date.now();
+  const tasks = SYMBOLS.flatMap((symbol) => [{ symbol, timeframe: '3m', run: async () =>
+    buildClosedCandles(await fetchCandleRows(symbol, '1m', 65)) },
+    ...Object.entries(TIMEFRAME_CONFIG).map(([timeframe, config]) => ({ symbol, timeframe, run: async () => {
+      const cached = state.timeframeHistory?.[symbol]?.[timeframe];
+      const expectedTs = Math.floor(now / config.durationMs) * config.durationMs - config.durationMs;
+      if (cached?.length === CONTEXT_HISTORY_LIMIT && cached.at(-1).ts === expectedTs) return cached;
+      return buildTimeframeCandles(await fetchCandleRows(symbol, config.interval, CONTEXT_HISTORY_LIMIT + 2), config.durationMs);
+    } }))]);
+  const results = await Promise.allSettled(tasks.map((task) => task.run()));
+  state.priceHistory = {};
+  state.timeframeHistory = {};
+  results.forEach((result, i) => {
+    const { symbol, timeframe } = tasks[i];
+    const hist = result.status === 'fulfilled' ? result.value : [];
+    // 조회 실패 시 오래된 값을 재사용하지 않는다. 다른 시간대의 정상 데이터는 유지한다.
+    if (timeframe === '3m') state.priceHistory[symbol] = hist;
+    else (state.timeframeHistory[symbol] ||= {})[timeframe] = hist;
+  });
+}
+
+function ema(prices, period) {
+  const alpha = 2 / (period + 1);
+  return prices.slice(1).reduce((value, price) => alpha * price + (1 - alpha) * value, prices[0]);
+}
+
+function analyzeTimeframe(hist, durationMs, now = Date.now()) {
+  if (!hist || hist.length < 20 || !Number.isFinite(hist.at(-1).ts) ||
+      hist.at(-1).ts + durationMs > now || now - (hist.at(-1).ts + durationMs) >= durationMs ||
+      hist.some((c, i) => ![c.open, c.high, c.low, c.price].every((v) => Number.isFinite(v) && v > 0) ||
+        (i > 0 && c.ts - hist[i - 1].ts !== durationMs))) return { available: false };
+  const prices = hist.map((c) => c.price);
+  const recent = hist.slice(-20);
+  const last = prices.at(-1);
+  const fast = ema(prices, 9), slow = ema(prices, 20);
+  const priorFast = ema(prices.slice(0, -3), 9);
+  const emaGapPct = (fast - slow) / last * 100;
+  const slopePct = (fast - priorFast) / priorFast * 100;
+  let path = 0;
+  for (let i = 1; i < recent.length; i++) path += Math.abs(recent[i].price - recent[i - 1].price);
+  const changePct = (recent.at(-1).price - recent[0].price) / recent[0].price * 100;
+  const efficiency = path > 0 ? Math.abs(recent.at(-1).price - recent[0].price) / path : 0;
+  const atrSamples = hist.slice(-14).map((c, i) => {
+    const previous = hist[hist.length - 15 + i].price;
+    return Math.max(c.high - c.low, Math.abs(c.high - previous), Math.abs(c.low - previous));
+  });
+  const atrPct = atrSamples.reduce((sum, v) => sum + v, 0) / atrSamples.length / last * 100;
+  const threshold = Math.max(0.05, atrPct * 0.25);
+  let regime = 'transition';
+  if (efficiency >= 0.35 && emaGapPct > threshold && slopePct > 0 && last > slow) regime = 'trend_up';
+  else if (efficiency >= 0.35 && emaGapPct < -threshold && slopePct < 0 && last < slow) regime = 'trend_down';
+  else if (efficiency <= 0.25 || Math.abs(emaGapPct) <= threshold) regime = 'range';
+  const labels = { trend_up: '상승 추세', trend_down: '하락 추세', range: '횡보', transition: '방향 전환·혼재' };
+  return { available: true, regime, label: labels[regime], changePct, emaGapPct, slopePct,
+    efficiency, atrPct, rsi: computeRSI(hist), lastClosedAt: hist.at(-1).ts + durationMs };
+}
+
+function analyzeMarket(state, symbol, now = Date.now()) {
+  const frames = { '3m': analyzeTimeframe(state.priceHistory[symbol], CANDLE_MS, now),
+    '15m': analyzeTimeframe(state.timeframeHistory?.[symbol]?.['15m'], TIMEFRAME_CONFIG['15m'].durationMs, now),
+    '1h': analyzeTimeframe(state.timeframeHistory?.[symbol]?.['1h'], TIMEFRAME_CONFIG['1h'].durationMs, now) };
+  const mid = frames['15m'], long = frames['1h'];
+  let regime = 'unknown';
+  if (mid.available && long.available) {
+    regime = mid.regime === long.regime ? mid.regime : 'transition';
+  }
+  const labels = { trend_up: '상위 시간대 상승 추세', trend_down: '상위 시간대 하락 추세',
+    range: '상위 시간대 횡보', transition: '시간대 방향 혼재·전환', unknown: '상위 시간대 데이터 미확인' };
+  return { analysisVersion: 1, symbol, regime, label: labels[regime],
+    contextAvailable: mid.available && long.available, frames };
 }
 
 function describeTrend(state, sym) {
@@ -213,11 +305,21 @@ function classifyEntrySignals(state, symbol, side) {
   const setupLabels = { range: '횡보 구간 진입', trend_following: '추세 동행', counter_trend: '추세 반대 진입' };
   const rsiLabels = { overbought: 'RSI 과매수', oversold: 'RSI 과매도', neutral: 'RSI 중립', unknown: 'RSI 미확인' };
   const volumeLabels = { high: '거래량 급증', low: '거래량 저조', normal: '거래량 평이', unknown: '거래량 미확인' };
-  return { signalVersion: 1, trend: describeTrend(state, symbol), rsi, volume: describeVolume(state, symbol),
-    direction, changePct, volumeRatio, setupId: `${setup}:${rsiBand}:${volumeBand}`,
+  const marketContext = analyzeMarket(state, symbol);
+  const contextTags = [];
+  if (marketContext.contextAvailable) {
+    const trendDirection = marketContext.regime === 'trend_up' ? 'up' : marketContext.regime === 'trend_down' ? 'down' : null;
+    const alignment = trendDirection ? ((side === 'short' ? trendDirection === 'down' : trendDirection === 'up') ? 'aligned' : 'opposed') : 'mixed';
+    marketContext.alignment = alignment;
+    const alignmentLabels = { aligned: '15분·1시간 추세 동행', opposed: '15분·1시간 추세 역행', mixed: '15분·1시간 방향 미확정' };
+    contextTags.push({ key: `regime:${marketContext.regime}`, label: marketContext.label },
+      { key: `alignment:${alignment}`, label: alignmentLabels[alignment] });
+  }
+  return { signalVersion: 1, marketContext, trend: describeTrend(state, symbol), rsi, volume: describeVolume(state, symbol),
+    direction, changePct, volumeRatio, setupId: `${setup}:${rsiBand}:${volumeBand}${contextTags.length ? `:${marketContext.regime}:${marketContext.alignment}` : ''}`,
     tags: [{ key: `trend:${setup}`, label: setupLabels[setup] },
       { key: `rsi:${rsiBand}`, label: rsiLabels[rsiBand] },
-      { key: `volume:${volumeBand}`, label: volumeLabels[volumeBand] }] };
+      { key: `volume:${volumeBand}`, label: volumeLabels[volumeBand] }, ...contextTags] };
 }
 
 function computeSignalPerformance(hist) {
@@ -761,14 +863,30 @@ BTC/ETH/SOL/XRP/DOGE는 급락장에서 서로 같이 움직이는 경향이 커
 묶을 수 있도록 시스템이 자동으로 제한하니(넘으면 증거금이 줄거나 진입이
 보류됨), 그 안에서 종목별 비중을 알아서 합리적으로 배분해라.
 
-market 데이터의 각 심볼에는 recentTrend/rsi/volumeSignal이 같이 온다.
+market 데이터의 각 심볼에는 recentTrend/rsi/volumeSignal과 marketContext가 같이 온다.
+marketContext.frames에는 완료된 3분·15분·1시간봉의 추세/횡보 분류, RSI,
+평균 변동폭(atrPct), 구간 변화율(changePct)이 있다. 3분은 진입 시점,
+15분은 중간 흐름, 1시간은 큰 방향을 확인하는 용도다. 서로 다른 구간의
+changePct를 같은 기간 수익률로 비교하지 마라.
+marketContext.regime은 15분과 1시간이 모두 같은 상태일 때 상승/하락 추세나
+횡보로 분류하고, 서로 다르면 transition(방향 혼재·전환)이다. 통계적
+휴리스틱이며 승률 예측값이나 확정된 시장 상태가 아니다.
+상위 시간대가 같은 추세이면 그 방향의 눌림/재가속을 먼저 검토해라.
+3분 한 봉의 반대 움직임만으로 1시간 추세가 뒤집혔다고 단정하지 마라.
+역추세 진입은 RSI 극값만으로 정당화하지 말고, 완료된 3분봉의 실제 반전과
+거래량, 15분 흐름 변화 근거를 함께 설명해라. 횡보이면 추세 돌파가 확인되지
+않은 중앙 구간 추격 대신 범위와 되돌림 근거를 확인해라. 방향 혼재는 어떤
+시간대의 움직임을 거래할지 구분해라. available=false인 시간대의 추세를
+추측하지 말고 확인 가능한 데이터로 판단해라. 데이터 누락 자체를 반전으로
+해석하거나 보유 포지션을 자동 청산하는 이유로 사용하지 마라.
 recentTrend는 "최근 N개 완료 3분봉 중 하락 5연속, 구간 수익률 -2.3%" 같은 식으로
 방향성 확인용이고, rsi는 과매수(70 이상)/과매도(30 이하)/중립을 보여주고,
 volumeSignal은 그 가격 움직임에 거래량이 실제로 동반됐는지("거래량 급증"
 "거래량 저조")를 보여준다. 셋을 같이 봐라 -- recentTrend가 연속 3~4회 이상
 같은 방향이어도 거래량이 저조하면 노이즈일 가능성이 있고, 반대로 거래량
-급증을 동반한 추세는 신뢰도가 더 높다. RSI가 과매수인데 추가로 롱 진입하거나
-과매도인데 추가로 숏 진입하는 건 피해라(되돌림 리스크). 매번 "아직 명확한
+급증을 동반한 추세는 신뢰도가 더 높다. RSI 과매수·과매도는 과열 경고이지 자동 반전 신호가 아니다. 상위 추세가
+강하면 극값이 지속될 수 있다. 과열 구간 추격은 눌림과 변동폭을 확인하고,
+반대 포지션은 실제 반전 근거가 있어야 한다. 매번 "아직 명확한
 추세가 아니다"라며 관망만 반복하지는 마라 -- 신호들이 같은 방향을 가리키면
 행동해도 된다.
 
@@ -883,6 +1001,7 @@ async function runTraderDecision(env, state, tickers, traderId, auto) {
       recentTrend: describeTrend(state, s),
       rsi: rsi ? `${rsi.value} (${rsi.label})` : '데이터 쌓이는 중',
       volumeSignal: describeVolume(state, s),
+      marketContext: analyzeMarket(state, s),
     };
   }).filter(Boolean);
   if (!market.length) return { traderId, skipped: true, reason: 'candle_data_unavailable' };
@@ -938,6 +1057,7 @@ function buildStateView(state, tickers) {
       holdings,
       closedTrades: perf.count,
       winRate: perf.count ? Math.round(perf.winRate) : null,
+      marketAnalysis: SYMBOLS.map((symbol) => analyzeMarket(state, symbol)),
       performance: perf,
       costModel: { ...COST_MODEL, enabledAt: state.costEnabledAt },
       closedTradeHistory: (state.tradeHistory[t.id] || []).slice(-50).reverse(),
@@ -953,6 +1073,20 @@ function buildStateView(state, tickers) {
     traders,
     tradeLog: state.tradeLog.slice(-50).reverse(),
   };
+}
+
+function splitHistoryEntries(entries) {
+  const chunks = [];
+  let current = [], estimatedBytes = 0;
+  for (const entry of entries) {
+    const size = JSON.stringify(entry).length * 3;
+    if (current.length && estimatedBytes + size > 200000) {
+      chunks.push(current); current = []; estimatedBytes = 0;
+    }
+    current.push(entry); estimatedBytes += size;
+  }
+  if (current.length) chunks.push(current);
+  return chunks;
 }
 
 export class TraderEngine {
@@ -974,14 +1108,28 @@ export class TraderEngine {
     const raw = await this.storage.get('state');
     const base = defaultState();
     if (!raw) return base;
+    const tradeHistory = { ...base.tradeHistory, ...raw.tradeHistory };
+    const chunkKeys = Object.values(raw.historyChunkKeys || {}).flat();
+    const chunkValues = new Map();
+    for (let i = 0; i < chunkKeys.length; i += 128) {
+      for (const [key, value] of await this.storage.get(chunkKeys.slice(i, i + 128))) chunkValues.set(key, value);
+    }
+    for (const [id, keys] of Object.entries(raw.historyChunkKeys || {})) {
+      tradeHistory[id] = keys.flatMap((key) => {
+        const entries = chunkValues.get(key);
+        if (!Array.isArray(entries)) throw new Error('거래 기록 조각 누락: ' + key);
+        return entries;
+      });
+    }
     return {
       portfolios: { ...base.portfolios, ...raw.portfolios },
       dailyBase: { ...base.dailyBase, ...raw.dailyBase },
       tradeLog: Array.isArray(raw.tradeLog) ? raw.tradeLog : [],
       tickers: raw.tickers || {},
-      tradeHistory: { ...base.tradeHistory, ...raw.tradeHistory },
+      tradeHistory,
       dailyHistory: { ...base.dailyHistory, ...raw.dailyHistory },
       priceHistory: raw.priceHistory || {},
+      timeframeHistory: raw.timeframeHistory || {},
       performanceTracking: raw.performanceTracking || {},
       costEnabledAt: raw.costEnabledAt || null,
       lastCycleAt: raw.lastCycleAt || null,
@@ -989,8 +1137,22 @@ export class TraderEngine {
   }
 
   async saveState(state) {
-    const trimmed = { ...state, tradeLog: state.tradeLog.slice(-200) };
-    await this.storage.put('state', trimmed);
+    // 분석 스냅샷이 누적돼 단일 저장 값의 크기 제한을 넘지 않도록 기록을 분할한다.
+    const historyChunkKeys = {}, values = {};
+    for (const [id, entries] of Object.entries(state.tradeHistory)) {
+      historyChunkKeys[id] = splitHistoryEntries(entries).map((chunk, i) => {
+        const key = `tradeHistory:${id}:${i}`; values[key] = chunk; return key;
+      });
+    }
+    values.state = { ...state, tradeHistory: {}, historyChunkKeys, tradeLog: state.tradeLog.slice(-200) };
+    await this.storage.transaction(async (transaction) => {
+      const previous = await transaction.get('state');
+      const oldKeys = Object.values(previous?.historyChunkKeys || {}).flat();
+      const obsolete = oldKeys.filter((key) => !(key in values));
+      const pairs = Object.entries(values);
+      for (let i = 0; i < pairs.length; i += 128) await transaction.put(Object.fromEntries(pairs.slice(i, i + 128)));
+      for (let i = 0; i < obsolete.length; i += 128) await transaction.delete(obsolete.slice(i, i + 128));
+    });
   }
 
   async runCycle(auto) {

@@ -435,6 +435,9 @@
         <div class="trader-badge" id="detailBadge"></div>
       </div>
       <div class="detail-sub" id="detailSub"></div>
+      <div class="section-title">시장 흐름 분석</div>
+      <div class="cost-note">완료된 3분·15분·1시간봉으로 분석합니다. 3분은 진입 타이밍, 15분·1시간은 큰 방향을 참고합니다. 서로 다른 방향이면 혼재·전환으로 표시합니다.</div>
+      <div class="day-list" id="marketAnalysis"></div>
       <div class="section-title">비용 차감 후 매매 성과</div>
       <div class="performance-grid" id="performanceGrid"></div>
       <div class="cost-note" id="costModelNote"></div>
@@ -580,6 +583,24 @@
     return String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   }
 
+  function renderMarketAnalysis(t) {
+    const rows = t.marketAnalysis || [];
+    document.getElementById('marketAnalysis').innerHTML = rows.length ? rows.map((row) => `<div class="day-row">
+      <div class="day-row-top"><span class="day-date">${escapeHtml(row.symbol.replace('USDT', ''))}</span></div>
+      <div class="trade-detail">${escapeHtml(row.label)}</div>
+      ${[['3m', '3분'], ['15m', '15분'], ['1h', '1시간']].map(([key, label]) => {
+        const frame = row.frames[key];
+        return `<div class="trade-detail">${label}: ${frame?.available ? `${escapeHtml(frame.label)} · RSI ${frame.rsi == null ? '미확인' : frame.rsi.toFixed(1)} · 평균 변동폭 ${frame.atrPct.toFixed(2)}%` : '완료된 최신 데이터 미확인'}</div>`;
+      }).join('')}
+      <details class="trade-detail"><summary>분석 시점과 구간 변화</summary>
+      ${[['3m', '3분'], ['15m', '15분'], ['1h', '1시간']].filter(([key]) => row.frames[key]?.available).map(([key, label]) => {
+        const frame = row.frames[key];
+        return `<p>${label} 최근 20개 봉 변화 ${frame.changePct >= 0 ? '+' : ''}${frame.changePct.toFixed(2)}% · 마지막 봉 종료 ${escapeHtml(new Date(frame.lastClosedAt).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' }))} KST</p>`;
+      }).join('')}
+      <p>추세·횡보 분류는 이동평균과 가격 경로를 이용한 추정이며 승률 예측값이 아닙니다.</p></details>
+    </div>`).join('') : '<div class="empty-day-list">다음 자동 분석에서 시장 흐름을 불러옵니다.</div>';
+  }
+
   function renderPerformance(t) {
     const perf = t.performance;
     const metrics = document.getElementById('performanceGrid');
@@ -627,6 +648,7 @@
           <p>진입: ${escapeHtml(h.entryReason || '이전 포지션 · 근거 미기록')}</p>
           <p>진입 신호: ${escapeHtml(h.entrySignals ? `${h.entrySignals.trend} / RSI ${h.entrySignals.rsi ?? '없음'} / ${h.entrySignals.volume}` : '미기록')}</p>
           ${(h.entryLegs || []).map((leg) => `<p>진입·추가 진입 ${escapeHtml(new Date(leg.ts).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' }))} · 증거금 ${escapeHtml(fmtWon(leg.marginKrw))} · ${escapeHtml(leg.reason)}</p>`).join('')}
+          ${h.entrySignals?.marketContext?.contextAvailable ? `<p>진입 당시 큰 흐름: ${escapeHtml(h.entrySignals.marketContext.label)} · 15분 ${escapeHtml(h.entrySignals.marketContext.frames['15m'].label)} · 1시간 ${escapeHtml(h.entrySignals.marketContext.frames['1h'].label)}</p>` : ''}
           <p>청산: ${escapeHtml(h.exitReason)}</p>
         </details>` : ''}
       </div>`;
@@ -641,6 +663,7 @@
     detailBadgeEl.textContent = t.badge;
     detailBadgeEl.style.display = t.badge ? '' : 'none';
     document.getElementById('detailSub').textContent = t.desc;
+    renderMarketAnalysis(t);
     renderPerformance(t);
     const dayListEl = document.getElementById('dayList');
     if (!t.dailyHistory.length) {
