@@ -296,6 +296,7 @@ function closePosition(state, traderId, symbol, price, fraction, reason, auto) {
   const netPnl = proceeds - part.margin - entryFeeKrw - entrySlippageKrw;
   const totalCosts = entryFeeKrw + entrySlippageKrw + costs.fee + costs.slippage + costs.funding;
   const pnlPct = ((price - h.avgPrice) / h.avgPrice) * 100 * (h.side === 'short' ? -1 : 1);
+  p.paidCostsKrw = paidTradingCosts(state, traderId) + Math.max(0, Math.max(0, part.margin + grossPnl) - proceeds);
   p.cash += proceeds;
   p.holdings[symbol] = { ...h, qty: h.qty * (1 - fraction), margin: h.margin * (1 - fraction),
     entryFeeKrw: (h.entryFeeKrw || 0) * (1 - fraction),
@@ -347,7 +348,7 @@ function closeOpenPositionsOnGoalHit(state, tickers) {
       if (!tk) return;
       const price = Number(tk.lastPrice);
       closePosition(state, t.id, symbol, price, 1,
-        `오늘 목표(+${t.dailyTargetPct}%) 달성으로 전량 청산 후 매매 종료`, true);
+        `오늘 비용 차감 전 목표(+${t.dailyTargetPct}%) 달성으로 전량 청산 후 매매 종료`, true);
     });
   });
 }
@@ -361,8 +362,8 @@ async function generateDayComment(env, trader, pctReturn, hit, trades) {
   const prompt = `
 너는 "${trader.name}"(${trader.badge}) 트레이더의 하루 결산을 짧게 코멘트하는 역할이다.
 성격/전략: ${trader.persona}
-오늘 목표 수익률: +${trader.dailyTargetPct}%
-오늘 실제 수익률: ${pctReturn >= 0 ? '+' : ''}${pctReturn.toFixed(2)}%
+오늘 목표 수익률 (비용 차감 전): +${trader.dailyTargetPct}%
+오늘 비용 차감 전 수익률: ${pctReturn >= 0 ? '+' : ''}${pctReturn.toFixed(2)}%
 목표 달성 여부: ${hit ? '달성' : '미달성'}
 오늘 청산된 거래들(최근 순): ${tradesText}
 
@@ -393,13 +394,13 @@ async function generateDayComment(env, trader, pctReturn, hit, trades) {
 }
 
 async function archiveDay(env, state, trader, base, tickers) {
-  const endValue = portfolioValue(state.portfolios[trader.id], tickers);
-  const pctReturn = base.value > 0 ? ((endValue - base.value) / base.value) * 100 : 0;
+  const pctReturn = todayPct(state, trader.id, tickers);
+  const netPctReturn = todayNetPct(state, trader.id, tickers);
   const hit = !!base.hitTarget || pctReturn >= trader.dailyTargetPct;
   const recentTrades = (state.tradeHistory[trader.id] || []).slice(-8);
   const comment = await generateDayComment(env, trader, pctReturn, hit, recentTrades);
   const hist = state.dailyHistory[trader.id] || (state.dailyHistory[trader.id] = []);
-  hist.push({ date: base.date, pctReturn: Number(pctReturn.toFixed(2)), targetPct: trader.dailyTargetPct, hit, comment });
+  hist.push({ date: base.date, returnBasis: 'gross', netPctReturn: Number(netPctReturn.toFixed(2)), pctReturn: Number(pctReturn.toFixed(2)), targetPct: trader.dailyTargetPct, hit, comment });
   if (hist.length > 60) hist.splice(0, hist.length - 60);
 }
 
@@ -413,15 +414,73 @@ async function rolloverDayIfNeeded(env, state, tickers) {
       await archiveDay(env, state, t, base, tickers);
     }
     if (!base || base.date !== today) {
-      state.dailyBase[t.id] = { date: today, value: portfolioValue(state.portfolios[t.id], tickers), hitTarget: false };
+      state.dailyBase[t.id] = { date: today, value: portfolioValue(state.portfolios[t.id], tickers), hitTarget: false,
+        paidCostsKrw: paidTradingCosts(state, t.id), pendingExitCostsKrw: pendingExitCosts(state.portfolios[t.id], tickers), returnBasis: 'gross' };
     }
   }
+}
+
+function paidTradingCosts(state, traderId) {
+  const p = state.portfolios[traderId];
+  if (Number.isFinite(p.paidCostsKrw)) return p.paidCostsKrw;
+  // 비용 원장이 없던 버전은 보존된 청산 기록과 잔여 진입 비용에서 복원한다.
+  const closed = (state.tradeHistory[traderId] || []).filter((h) => Number.isFinite(h.totalCosts));
+  return closed.reduce((sum, h) => sum + Math.max(0, Math.max(-h.marginKrw, h.grossPnl) - h.pnl), 0) +
+    Object.values(p.holdings).reduce((sum, h) => sum + (h.entryFeeKrw || 0) + (h.entrySlippageKrw || 0), 0);
+}
+
+function pendingExitCosts(portfolio, tickers) {
+  return Object.entries(portfolio.holdings).reduce((sum, [symbol, h]) => {
+    if (h.qty <= 0 || !tickers[symbol]) return sum;
+    const price = Number(tickers[symbol].lastPrice);
+    return sum + Math.max(0, h.margin + positionPnl(h, price)) - positionValue(h, price);
+  }, 0);
+}
+
+function migrateGoalCostBasis(state) {
+  TRADERS.forEach((t) => {
+    const p = state.portfolios[t.id];
+    p.paidCostsKrw = paidTradingCosts(state, t.id);
+    const base = state.dailyBase[t.id];
+    if (!base || Number.isFinite(base.paidCostsKrw)) return;
+    const start = Date.parse(`${base.date}T00:00:00+09:00`);
+    let costsBeforeDay = 0;
+    for (const h of state.tradeHistory[t.id] || []) {
+      if (!Number.isFinite(h.totalCosts)) continue;
+      if (h.ts < start) costsBeforeDay += Math.max(0, Math.max(-h.marginKrw, h.grossPnl) - h.pnl);
+      else if (h.openedAt && h.openedAt < start) {
+        const legs = h.entryLegs || [];
+        const allEntry = legs.reduce((sum, leg) => sum + leg.feeKrw + leg.slippageKrw, 0);
+        const priorEntry = legs.filter((leg) => leg.ts < start).reduce((sum, leg) => sum + leg.feeKrw + leg.slippageKrw, 0);
+        costsBeforeDay += allEntry > 0 ? (h.entryFeeKrw + h.entrySlippageKrw) * priorEntry / allEntry : 0;
+      }
+    }
+    Object.values(p.holdings).forEach((h) => {
+      const legs = h.entryLegs || [];
+      const allEntry = legs.reduce((sum, leg) => sum + leg.feeKrw + leg.slippageKrw, 0);
+      const priorEntry = legs.filter((leg) => leg.ts < start).reduce((sum, leg) => sum + leg.feeKrw + leg.slippageKrw, 0);
+      costsBeforeDay += allEntry > 0 ? ((h.entryFeeKrw || 0) + (h.entrySlippageKrw || 0)) * priorEntry / allEntry : 0;
+    });
+    base.paidCostsKrw = costsBeforeDay;
+    // 현재 전환일의 자정은 비용 모델 도입 전이므로 미청산 비용은 없었다.
+    base.pendingExitCostsKrw = 0;
+    base.returnBasis = 'gross';
+  });
+}
+
+function todayNetPct(state, traderId, tickers) {
+  const base = state.dailyBase[traderId];
+  if (!base || base.value <= 0) return 0;
+  return ((portfolioValue(state.portfolios[traderId], tickers) - base.value) / base.value) * 100;
 }
 
 function todayPct(state, traderId, tickers) {
   const base = state.dailyBase[traderId];
   if (!base || base.value <= 0) return 0;
-  return ((portfolioValue(state.portfolios[traderId], tickers) - base.value) / base.value) * 100;
+  const value = portfolioValue(state.portfolios[traderId], tickers);
+  const costChange = paidTradingCosts(state, traderId) - (base.paidCostsKrw || 0) +
+    pendingExitCosts(state.portfolios[traderId], tickers) - (base.pendingExitCostsKrw || 0);
+  return ((value - base.value + costChange) / base.value) * 100;
 }
 
 function goalReached(state, traderId, tickers) {
@@ -573,6 +632,7 @@ function applyDecision(state, traderId, decision, tickers) {
         feeKrw: entryFeeKrw, slippageKrw: entrySlippageKrw, reason, signals };
       const newQty = base.qty + qty;
       const newAvgPrice = (base.qty * base.avgPrice + qty * price) / newQty;
+      p.paidCostsKrw = paidTradingCosts(state, traderId) + entryFeeKrw + entrySlippageKrw;
       p.holdings[symbol] = {
         qty: newQty,
         avgPrice: newAvgPrice,
@@ -672,7 +732,7 @@ volumeSignal은 그 가격 움직임에 거래량이 실제로 동반됐는지("
 꺾이는 신호가 나오거나 자동 익절(+5%)/수익보호 규칙에 닿을 때까지 들고 가는
 게 기본값이고, 지는 포지션은 짧게 끊는 게 맞는 방향이다.
 
-오늘 목표 수익률은 크지 않다(1% 안팎). 큰 승부를 걸어서 한 번에 채우려 하지
+오늘 목표 수익률은 수수료·슬리피지·펀딩비 차감 전 +1%다. 큰 승부를 걸어서 한 번에 채우려 하지
 말고, 확률 높은 기회를 노려서 목표를 채우는 데 집중해라. 목표를 채우면
 오늘 열려있던 포지션도 전부 정리되고 그날 매매는 자동으로 종료된다.
 
@@ -711,11 +771,11 @@ ${JSON.stringify(portfolio.holdings)}
 [현재 시세]
 ${JSON.stringify(market)}
 
-[오늘 수익률과 목표: 퍼센트 단위, 0.1은 0.1%이며 1%가 아니다]
+[오늘 비용 차감 전 수익률과 목표: 퍼센트 단위, 0.1은 0.1%이며 1%가 아니다]
 ${JSON.stringify({ todayReturnPct: myTodayPct, targetReturnPct: TRADERS[0].dailyTargetPct,
   targetReached: myTodayPct >= TRADERS[0].dailyTargetPct,
   remainingPercentagePoints: Math.max(0, TRADERS[0].dailyTargetPct - myTodayPct) })}
-목표 달성 여부는 targetReached만 사용해라. 손실 만회나 목표를 채우기 위한 이유만으로 진입하지 마라.
+목표는 수수료·슬리피지·펀딩비 차감 전 +1%다. 목표 달성 여부는 targetReached만 사용해라. 손실 만회나 목표를 채우기 위한 이유만으로 진입하지 마라.
 
 [최근 내 거래 성과 피드백]
 ${performanceSummary}
@@ -818,6 +878,8 @@ function buildStateView(state, tickers) {
       pnl,
       pnlPct,
       todayPct: todayPctVal,
+      todayNetPct: todayNetPct(state, t.id, tickers),
+      goalReturnBasis: 'gross',
       goalHit: goalReached(state, t.id, tickers),
       holdings,
       closedTrades: perf.count,
@@ -879,6 +941,7 @@ export class TraderEngine {
 
   async runCycle(auto) {
     const state = await this.loadState();
+    migrateGoalCostBasis(state);
     initializeCostTracking(state);
     const tickers = await fetchTickers();
     state.tickers = tickers;
@@ -912,6 +975,7 @@ export class TraderEngine {
 
     if (url.pathname === '/state' && request.method === 'GET') {
       const state = await this.loadState();
+      migrateGoalCostBasis(state);
       return json(buildStateView(state, state.tickers));
     }
 
@@ -927,6 +991,7 @@ export class TraderEngine {
         return json({ error: 'traderId가 올바르지 않습니다' }, 400);
       }
       const state = await this.loadState();
+      migrateGoalCostBasis(state);
       initializeCostTracking(state);
       const tickers = await fetchTickers();
       state.tickers = tickers;
