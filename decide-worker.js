@@ -152,9 +152,11 @@ async function updatePriceHistory(state) {
   const results = await Promise.allSettled(tasks.map((task) => task.run()));
   state.priceHistory = {};
   state.timeframeHistory = {};
+  state.marketDataStatus = { checkedAt: Date.now(), feeds: [] };
   results.forEach((result, i) => {
     const { symbol, timeframe } = tasks[i];
     const hist = result.status === 'fulfilled' ? result.value : [];
+    state.marketDataStatus.feeds.push({ symbol, timeframe, available: result.status === 'fulfilled', lastCandleAt: hist.at(-1)?.ts ?? null, error: result.status === 'rejected' ? String(result.reason?.message || result.reason) : null });
     // 조회 실패 시 오래된 값을 재사용하지 않는다. 다른 시간대의 정상 데이터는 유지한다.
     if (timeframe === '3m') state.priceHistory[symbol] = hist;
     else (state.timeframeHistory[symbol] ||= {})[timeframe] = hist;
@@ -829,6 +831,9 @@ function applyDecision(state, traderId, decision, tickers) {
       decision.action = 'hold';
       decision.reason = `${reason} [전체 노출 한도·현금·반대 포지션 확인 후 진입 보류]`;
     }
+  } else if (action === 'buy' || action === 'short') {
+    decision.action = 'hold';
+    decision.reason = '진입 미실행: 주문 금액이 0원입니다.';
   } else if (action === 'sell' && symbol) {
     const t = tickers[symbol];
     const prev = p.holdings[symbol];
@@ -846,6 +851,8 @@ function applyDecision(state, traderId, decision, tickers) {
       closePosition(state, traderId, symbol, price, fraction, reason, !!decision.auto);
       return;
     }
+    decision.action = 'hold';
+    decision.reason = prev?.qty > 0 ? '청산 미실행: 현재 시세를 확인할 수 없습니다.' : '청산 미실행: 해당 종목의 보유 수량이 없습니다.';
   }
   state.tradeLog.push({ traderId, action: decision.action, symbol, reason: decision.reason, auto: !!decision.auto, ts: Date.now(),
     marginKrw: decision.marginKrw, notionalKrw: decision.notionalKrw, entryCostsKrw: decision.entryCostsKrw });
@@ -940,7 +947,12 @@ volumeSignal은 그 가격 움직임에 거래량이 실제로 동반됐는지("
 }
 `.trim();
 
+function activeHoldings(portfolio) {
+  return Object.fromEntries(Object.entries(portfolio.holdings).filter(([, h]) => Number.isFinite(h.qty) && h.qty > 0));
+}
+
 async function callClaude(env, persona, leverage, portfolio, market, myTodayPct, performanceSummary) {
+  const holdings = activeHoldings(portfolio);
   const userContent = `
 [트레이더 성격/전략]
 ${persona}
@@ -952,7 +964,8 @@ ${leverage}x
 ${portfolio.cash}원
 
 [현재 보유 자산 (margin=증거금, qty=레버리지 적용된 수량, avgPrice=평균단가, side=long|short)]
-${JSON.stringify(portfolio.holdings)}
+${JSON.stringify({ positionCount: Object.keys(holdings).length, positions: holdings })}
+위 positions가 유일한 현재 보유 목록이다. 비어 있으면 전액 현금 상태이며 보유·유지·청산 중이라고 설명하지 마라. 시장 분석 대상은 보유 종목이 아니다. sell은 positions에 있는 수량이 양수인 종목에만 허용된다.
 
 [현재 시세]
 ${JSON.stringify(market)}
@@ -1029,8 +1042,9 @@ async function runTraderDecision(env, state, tickers, traderId, auto) {
       Number(todayPct(state, traderId, tickers).toFixed(2)),
       buildPerformanceSummary(state, traderId)
     );
-    applyDecision(state, traderId, { ...decision, auto }, tickers);
-    return { traderId, skipped: false, decision };
+    const executedDecision = { ...decision, auto };
+    applyDecision(state, traderId, executedDecision, tickers);
+    return { traderId, skipped: false, decision: executedDecision };
   } catch (e) {
     state.tradeLog.push({ traderId, action: 'hold', symbol: null, reason: `오류: ${e.message}`, auto, ts: Date.now() });
     return { traderId, skipped: false, error: e.message };
@@ -1082,6 +1096,7 @@ function buildStateView(state, tickers) {
   return {
     serverTime: Date.now(),
     lastCycleAt: state.lastCycleAt || null,
+    marketDataStatus: state.marketDataStatus || null,
     krwRate: KRW_RATE,
     startBalance: START_BALANCE,
     intervalSeconds: INTERVAL_SECONDS,
@@ -1145,6 +1160,7 @@ export class TraderEngine {
       dailyHistory: { ...base.dailyHistory, ...raw.dailyHistory },
       priceHistory: raw.priceHistory || {},
       timeframeHistory: raw.timeframeHistory || {},
+      marketDataStatus: raw.marketDataStatus || null,
       performanceTracking: raw.performanceTracking || {},
       costEnabledAt: raw.costEnabledAt || null,
       lastCycleAt: raw.lastCycleAt || null,
@@ -1209,7 +1225,9 @@ export class TraderEngine {
       const state = await this.loadState();
       migrateGoalCostBasis(state);
       migrateNetGoal(state, state.tickers);
-      return json(buildStateView(state, state.tickers));
+      const view = buildStateView(state, state.tickers);
+      view.nextAlarmAt = await this.storage.getAlarm();
+      return json(view);
     }
 
     if (url.pathname === '/decide-now' && request.method === 'POST') {

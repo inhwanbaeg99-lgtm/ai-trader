@@ -298,3 +298,22 @@ test('expanded history storage preserves legacy records and round-trips split sn
   await run('storageEngine.saveState(toSave)');
   assert.equal([...values.keys()].filter(k=>k.startsWith('tradeHistory:')).length,0);
 });
+
+
+test('closed zero-quantity positions are excluded from AI holdings and cannot produce a sell log', () => {
+  freshPosition();
+  run("closePosition(state,'A','BTCUSDT',100,1,'close',true)");
+  const cash = run('state.portfolios.A.cash');
+  const count = run('state.tradeHistory.A.length');
+  assert.equal(run('Object.keys(activeHoldings(state.portfolios.A)).length'),0);
+  run("applyDecision(state,'A',{action:'sell',symbol:'BTCUSDT',amountKrw:0,reason:'fake close'},tickers)");
+  assert.equal(run('state.tradeLog.at(-1).action'),'hold');
+  assert.match(run('state.tradeLog.at(-1).reason'),/보유 수량이 없습니다/);
+  near(run('state.portfolios.A.cash'),cash);
+  assert.equal(run('state.tradeHistory.A.length'),count);
+});
+test('zero-amount entry is never logged as a completed buy', () => {
+  freshPosition();
+  run("applyDecision(state,'A',{action:'buy',symbol:'BTCUSDT',amountKrw:0,reason:'zero'},tickers)");
+  assert.equal(run('state.tradeLog.at(-1).action'),'hold');
+});
