@@ -505,12 +505,12 @@ function closeOpenPositionsOnGoalHit(state, tickers) {
       if (!tk) return;
       const price = Number(tk.lastPrice);
       closePosition(state, t.id, symbol, price, 1,
-        `오늘 비용 차감 전 목표(+${t.dailyTargetPct}%) 달성으로 전량 청산 후 매매 종료`, true);
+        `오늘 비용 차감 후 목표(+${t.dailyTargetPct}%) 달성으로 전량 청산 후 매매 종료`, true);
     });
   });
 }
 
-async function generateDayComment(env, trader, pctReturn, hit, trades) {
+async function generateDayComment(env, trader, pctReturn, hit, trades, returnBasis = 'net') {
   const tradesText = trades.length
     ? trades
         .map((h) => `${h.symbol.replace('USDT', '')} ${h.pnl >= 0 ? '+' : ''}${Math.round(h.pnl).toLocaleString('ko-KR')}원`)
@@ -519,8 +519,8 @@ async function generateDayComment(env, trader, pctReturn, hit, trades) {
   const prompt = `
 너는 "${trader.name}"(${trader.badge}) 트레이더의 하루 결산을 짧게 코멘트하는 역할이다.
 성격/전략: ${trader.persona}
-오늘 목표 수익률 (비용 차감 전): +${trader.dailyTargetPct}%
-오늘 비용 차감 전 수익률: ${pctReturn >= 0 ? '+' : ''}${pctReturn.toFixed(2)}%
+오늘 목표 수익률 (${returnBasis === 'gross' ? '비용 차감 전' : '비용 차감 후'}): +${trader.dailyTargetPct}%
+오늘 ${returnBasis === 'gross' ? '비용 차감 전' : '비용 차감 후'} 수익률: ${pctReturn >= 0 ? '+' : ''}${pctReturn.toFixed(2)}%
 목표 달성 여부: ${hit ? '달성' : '미달성'}
 오늘 청산된 거래들(최근 순): ${tradesText}
 
@@ -551,13 +551,13 @@ async function generateDayComment(env, trader, pctReturn, hit, trades) {
 }
 
 async function archiveDay(env, state, trader, base, tickers) {
-  const pctReturn = todayPct(state, trader.id, tickers);
+  const pctReturn = base.returnBasis === 'gross' ? todayGrossPct(state, trader.id, tickers) : todayPct(state, trader.id, tickers);
   const netPctReturn = todayNetPct(state, trader.id, tickers);
   const hit = !!base.hitTarget || pctReturn >= trader.dailyTargetPct;
   const recentTrades = (state.tradeHistory[trader.id] || []).slice(-8);
-  const comment = await generateDayComment(env, trader, pctReturn, hit, recentTrades);
+  const comment = await generateDayComment(env, trader, pctReturn, hit, recentTrades, base.returnBasis);
   const hist = state.dailyHistory[trader.id] || (state.dailyHistory[trader.id] = []);
-  hist.push({ date: base.date, returnBasis: 'gross', netPctReturn: Number(netPctReturn.toFixed(2)), pctReturn: Number(pctReturn.toFixed(2)), targetPct: trader.dailyTargetPct, hit, comment });
+  hist.push({ date: base.date, returnBasis: base.returnBasis || 'net', netPctReturn: Number(netPctReturn.toFixed(2)), pctReturn: Number(pctReturn.toFixed(2)), targetPct: trader.dailyTargetPct, hit, comment });
   if (hist.length > 60) hist.splice(0, hist.length - 60);
 }
 
@@ -572,7 +572,7 @@ async function rolloverDayIfNeeded(env, state, tickers) {
     }
     if (!base || base.date !== today) {
       state.dailyBase[t.id] = { date: today, value: portfolioValue(state.portfolios[t.id], tickers), hitTarget: false,
-        paidCostsKrw: paidTradingCosts(state, t.id), pendingExitCostsKrw: pendingExitCosts(state.portfolios[t.id], tickers), returnBasis: 'gross' };
+        paidCostsKrw: paidTradingCosts(state, t.id), pendingExitCostsKrw: pendingExitCosts(state.portfolios[t.id], tickers), returnBasis: 'net' };
     }
   }
 }
@@ -631,13 +631,27 @@ function todayNetPct(state, traderId, tickers) {
   return ((portfolioValue(state.portfolios[traderId], tickers) - base.value) / base.value) * 100;
 }
 
-function todayPct(state, traderId, tickers) {
+function todayGrossPct(state, traderId, tickers) {
   const base = state.dailyBase[traderId];
   if (!base || base.value <= 0) return 0;
   const value = portfolioValue(state.portfolios[traderId], tickers);
   const costChange = paidTradingCosts(state, traderId) - (base.paidCostsKrw || 0) +
     pendingExitCosts(state.portfolios[traderId], tickers) - (base.pendingExitCostsKrw || 0);
   return ((value - base.value + costChange) / base.value) * 100;
+}
+
+function todayPct(state, traderId, tickers) {
+  return todayNetPct(state, traderId, tickers);
+}
+
+// 오늘의 이전 비용 전 목표로 인한 중단만 해제한다. 기준 자산과 기록은 유지한다.
+function migrateNetGoal(state, tickers) {
+  for (const t of TRADERS) {
+    const base = state.dailyBase[t.id];
+    if (!base || base.date !== todayDateStr() || base.returnBasis === 'net') continue;
+    base.hitTarget = todayNetPct(state, t.id, tickers) >= t.dailyTargetPct;
+    base.returnBasis = 'net';
+  }
 }
 
 function goalReached(state, traderId, tickers) {
@@ -904,7 +918,7 @@ volumeSignal은 그 가격 움직임에 거래량이 실제로 동반됐는지("
 꺾이는 신호가 나오거나 자동 익절(+5%)/수익보호 규칙에 닿을 때까지 들고 가는
 게 기본값이고, 지는 포지션은 짧게 끊는 게 맞는 방향이다.
 
-오늘 목표 수익률은 수수료·슬리피지·펀딩비 차감 전 +1%다. 큰 승부를 걸어서 한 번에 채우려 하지
+오늘 목표 수익률은 수수료·슬리피지·펀딩비 차감 후 +1%다. 큰 승부를 걸어서 한 번에 채우려 하지
 말고, 확률 높은 기회를 노려서 목표를 채우는 데 집중해라. 목표를 채우면
 오늘 열려있던 포지션도 전부 정리되고 그날 매매는 자동으로 종료된다.
 
@@ -943,11 +957,11 @@ ${JSON.stringify(portfolio.holdings)}
 [현재 시세]
 ${JSON.stringify(market)}
 
-[오늘 비용 차감 전 수익률과 목표: 퍼센트 단위, 0.1은 0.1%이며 1%가 아니다]
+[오늘 비용 차감 후 수익률과 목표: 퍼센트 단위, 0.1은 0.1%이며 1%가 아니다]
 ${JSON.stringify({ todayReturnPct: myTodayPct, targetReturnPct: TRADERS[0].dailyTargetPct,
   targetReached: myTodayPct >= TRADERS[0].dailyTargetPct,
   remainingPercentagePoints: Math.max(0, TRADERS[0].dailyTargetPct - myTodayPct) })}
-목표는 수수료·슬리피지·펀딩비 차감 전 +1%다. 목표 달성 여부는 targetReached만 사용해라. 손실 만회나 목표를 채우기 위한 이유만으로 진입하지 마라.
+목표는 수수료·슬리피지·펀딩비 차감 후 +1%다. 목표 달성 여부는 targetReached만 사용해라. 손실 만회나 목표를 채우기 위한 이유만으로 진입하지 마라.
 
 [최근 내 거래 성과 피드백]
 ${performanceSummary}
@@ -1052,7 +1066,8 @@ function buildStateView(state, tickers) {
       pnlPct,
       todayPct: todayPctVal,
       todayNetPct: todayNetPct(state, t.id, tickers),
-      goalReturnBasis: 'gross',
+      goalReturnBasis: 'net',
+      todayGrossPct: todayGrossPct(state, t.id, tickers),
       goalHit: goalReached(state, t.id, tickers),
       holdings,
       closedTrades: perf.count,
@@ -1163,6 +1178,7 @@ export class TraderEngine {
     state.tickers = tickers;
     await updatePriceHistory(state);
     await rolloverDayIfNeeded(this.env, state, tickers);
+    migrateNetGoal(state, tickers);
     markGoalHitToday(state, tickers);
     checkStopLossAndTakeProfit(state, tickers);
     closeOpenPositionsOnGoalHit(state, tickers);
@@ -1192,6 +1208,7 @@ export class TraderEngine {
     if (url.pathname === '/state' && request.method === 'GET') {
       const state = await this.loadState();
       migrateGoalCostBasis(state);
+      migrateNetGoal(state, state.tickers);
       return json(buildStateView(state, state.tickers));
     }
 
@@ -1213,6 +1230,7 @@ export class TraderEngine {
       state.tickers = tickers;
       await updatePriceHistory(state);
       await rolloverDayIfNeeded(this.env, state, tickers);
+    migrateNetGoal(state, tickers);
       markGoalHitToday(state, tickers);
       checkStopLossAndTakeProfit(state, tickers);
       closeOpenPositionsOnGoalHit(state, tickers);

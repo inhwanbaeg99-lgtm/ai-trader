@@ -140,32 +140,36 @@ test('a reached daily target remains locked after close costs reduce the final r
   assert.equal(run('goalReached(state,"A",tickers)'),true);
 });
 
-test('gross daily target reaches 1% even when net return is below 1%', () => {
+test('net target resumes a gross-only stopped day and closes only after net 1%', () => {
   freshPosition();
-  run('state.dailyBase.A={date:todayDateStr(),value:10000000,paidCostsKrw:0,pendingExitCostsKrw:0,hitTarget:false}; tickers.BTCUSDT.lastPrice=102');
-  near(run('todayPct(state,"A",tickers)'),1);
-  assert.ok(run('todayNetPct(state,"A",tickers)') < 1);
-  assert.equal(run('goalReached(state,"A",tickers)'),true);
+  run('state.dailyBase.A={date:todayDateStr(),value:10000000,paidCostsKrw:0,pendingExitCostsKrw:0,hitTarget:true,returnBasis:"gross"}; tickers.BTCUSDT.lastPrice=102; migrateNetGoal(state,tickers)');
+  near(run('todayGrossPct(state,"A",tickers)'),1);
+  assert.equal(run('goalReached(state,"A",tickers)'),false);
+  assert.equal(run('state.dailyBase.A.returnBasis'), 'net');
   run('markGoalHitToday(state,tickers); closeOpenPositionsOnGoalHit(state,tickers)');
-  near(run('todayPct(state,"A",tickers)'),1);
+  assert.ok(run('state.portfolios.A.holdings.BTCUSDT.qty') > 0);
+  run('tickers.BTCUSDT.lastPrice=103; markGoalHitToday(state,tickers); closeOpenPositionsOnGoalHit(state,tickers)');
+  assert.ok(run('todayPct(state,"A",tickers)') >= 1);
   assert.equal(run('state.portfolios.A.holdings.BTCUSDT.qty'),0);
   assert.equal(run('goalReached(state,"A",tickers)'),true);
+  run('migrateNetGoal(state,tickers)');
+  assert.equal(run('state.dailyBase.A.hitTarget'),true);
 });
 test('flat round trip has zero gross return while net return includes costs', () => {
   freshPosition();
   run('state.dailyBase.A={value:10000000,paidCostsKrw:0,pendingExitCostsKrw:0,hitTarget:false}');
-  near(run('todayPct(state,"A",tickers)'),0);
+  near(run('todayGrossPct(state,"A",tickers)'),0);
   run("closePosition(state,'A','BTCUSDT',100,1,'flat',true)");
-  near(run('todayPct(state,"A",tickers)'),0);
+  near(run('todayGrossPct(state,"A",tickers)'),0);
   assert.ok(run('todayNetPct(state,"A",tickers)') < 0);
 });
 test('costs paid before a new daily baseline are not added to the next daily return', async () => {
   freshPosition();
   run('state.dailyBase.A=null');
   await run('rolloverDayIfNeeded({},state,tickers)');
-  near(run('todayPct(state,"A",tickers)'),0);
+  near(run('todayGrossPct(state,"A",tickers)'),0);
   run("closePosition(state,'A','BTCUSDT',100,1,'flat',true)");
-  near(run('todayPct(state,"A",tickers)'),0);
+  near(run('todayGrossPct(state,"A",tickers)'),0);
 });
 test('cost ledger can be restored from closed records without counting costs twice', () => {
   freshPosition();

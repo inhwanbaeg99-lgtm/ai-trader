@@ -495,7 +495,7 @@
           <span class="trader-balance">${fmtWon(t.value)}</span>
           <span class="trader-pnl ${pnlCls}">${t.pnl >= 0 ? '+' : ''}${fmtWon(t.pnl)} (${t.pnlPct >= 0 ? '+' : ''}${t.pnlPct.toFixed(2)}%)</span>
           <div class="daily-goal-row">
-            <div class="daily-goal-label"><span>오늘 비용 전 ${t.todayPct >= 0 ? '+' : ''}${t.todayPct.toFixed(1)}%</span><span>비용 전 목표 +${t.dailyTargetPct}%</span></div>
+            <div class="daily-goal-label"><span>오늘 비용 차감 후 ${t.todayPct >= 0 ? '+' : ''}${t.todayPct.toFixed(1)}%</span><span>비용 차감 후 목표 +${t.dailyTargetPct}%</span></div>
             <div class="daily-goal-bar"><div class="daily-goal-fill ${t.todayPct < 0 ? 'negative' : ''}" style="width:${goalRatio * 100}%"></div></div>
           </div>
           <div class="trader-holdings">${holdingsHtml}</div>
@@ -532,7 +532,7 @@
             <span class="trader-balance">${fmtWon(t.value)}</span>
           </div>
           <div class="trader-sub-row">
-            <span class="trader-goal-label">비용 전 ${t.todayPct >= 0 ? '+' : ''}${t.todayPct.toFixed(1)}% / 목표 +${t.dailyTargetPct}%</span>
+            <span class="trader-goal-label">비용 차감 후 ${t.todayPct} >= 0 ? '+' : ''}${t.todayPct.toFixed(1)}% / 목표 +${t.dailyTargetPct}%</span>
             <span class="trader-pnl ${pnlCls}">${t.pnl >= 0 ? '+' : ''}${fmtWon(t.pnl)} (${t.pnlPct >= 0 ? '+' : ''}${t.pnlPct.toFixed(2)}%)</span>
           </div>
           <div class="daily-goal-bar"><div class="daily-goal-fill ${t.todayPct < 0 ? 'negative' : ''}" style="width:${goalRatio * 100}%"></div></div>
@@ -615,8 +615,8 @@
       return;
     }
     const values = [
-      ['오늘 비용 전 수익률', `${(t.todayPct ?? 0).toFixed(2)}% / 목표 +${t.dailyTargetPct}%`],
-      ['오늘 비용 차감 수익률', `${(t.todayNetPct ?? t.todayPct ?? 0).toFixed(2)}%`],
+      ['오늘 비용 전 수익률', `${(t.todayGrossPct ?? 0).toFixed(2)}%`],
+      ['오늘 비용 차감 후 수익률', `${(t.todayNetPct ?? t.todayPct ?? 0).toFixed(2)}% / 목표 +${t.dailyTargetPct}%`],
       ['청산 순손익', fmtWon(perf.totalPnl)],
       ['청산 1건 평균 순손익', perf.count ? fmtWon(perf.avgPnl) : '기록 없음'],
       ['비용 차감 후 승률', perf.count ? `${perf.winRate.toFixed(1)}% (${perf.count}건)` : '기록 없음'],
@@ -677,7 +677,7 @@
             <span class="day-date">${d.date}</span>
             <span class="day-badge ${d.hit ? 'hit' : 'miss'}">${d.hit ? '달성' : '미달성'}</span>
           </div>
-          <div class="day-pct">${d.returnBasis === 'gross' ? '그날 비용 전 수익률' : '그날 수익률 (이전 기준)'} ${d.pctReturn >= 0 ? '+' : ''}${d.pctReturn.toFixed(2)}% / ${d.returnBasis === 'gross' ? '비용 전 목표' : '목표'} +${d.targetPct}%${typeof d.netPctReturn === 'number' ? ` · 비용 차감 후 ${d.netPctReturn >= 0 ? '+' : ''}${d.netPctReturn.toFixed(2)}%` : ''}</div>
+          <div class="day-pct">${d.returnBasis === 'gross' ? '그날 비용 전 수익률' : d.returnBasis === 'net' ? '그날 비용 차감 후 수익률' : '그날 수익률 (이전 기준)'} ${d.pctReturn >= 0 ? '+' : ''}${d.pctReturn.toFixed(2)}% / ${d.returnBasis === 'gross' ? '비용 전 목표' : '목표'} +${d.targetPct}%${typeof d.netPctReturn === 'number' ? ` · 비용 차감 후 ${d.netPctReturn >= 0 ? '+' : ''}${d.netPctReturn.toFixed(2)}%` : ''}</div>
           <div class="day-comment">${d.comment}</div>
         </div>
       `)
