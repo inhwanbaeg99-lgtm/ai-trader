@@ -482,7 +482,7 @@
         : '<div class="empty-holdings">보유 중인 자산 없음</div>';
       const goalRatio = Math.min(1, Math.abs(t.todayPct) / t.dailyTargetPct);
       const goalBannerHtml = t.goalHit
-        ? `<div class="goal-banner">🎯 비용 전 목표 달성! +${t.todayPct.toFixed(1)}% (오늘은 매매 종료)</div>`
+        ? `<div class="goal-banner">목표 달성! +${t.todayPct.toFixed(1)}% (오늘은 매매 종료)</div>`
         : '';
       return `
         <div class="trader-card ${t.goalHit ? 'goal-hit' : ''}" data-trader="${t.id}">
@@ -519,7 +519,7 @@
         : '';
       const goalRatio = Math.min(1, Math.abs(t.todayPct) / t.dailyTargetPct);
       const goalBannerHtml = t.goalHit
-        ? `<div class="goal-banner">🎯 비용 전 목표 달성! +${t.todayPct.toFixed(1)}% (오늘은 매매 종료)</div>`
+        ? `<div class="goal-banner">목표 달성! +${t.todayPct.toFixed(1)}% (오늘은 매매 종료)</div>`
         : '';
       return `
         <div class="trader-card ${t.goalHit ? 'goal-hit' : ''}" data-trader="${t.id}">
