@@ -65,21 +65,55 @@ function defaultState() {
   return { portfolios, dailyBase, tradeLog: [], tickers: {}, tradeHistory, dailyHistory, priceHistory: {}, lastCycleAt: null };
 }
 
-// 시세는 매 사이클 스냅샷 하나뿐이라 "지금이 추세인지"를 모델이 판단할 근거가
-// 없었다 (계속 관망만 반복하던 원인). 심볼별로 최근 체크 시점들의 가격을
-// 남겨둬서 "몇 번 연속 같은 방향으로 움직였는지"를 계산해 판단 프롬프트에
-// 같이 넘겨준다.
+// 1분봉 3개를 묶어 완전히 종료된 3분봉만 사용한다.
+// 조회 횟수나 수동 판단 호출이 지표의 시간 간격을 바꾸지 않는다.
 const PRICE_HISTORY_LIMIT = 20;
+const CANDLE_MS = 3 * 60 * 1000;
 
-function updatePriceHistory(state, tickers) {
-  if (!state.priceHistory) state.priceHistory = {};
-  const now = Date.now();
-  SYMBOLS.forEach((sym) => {
-    const t = tickers[sym];
-    if (!t) return;
-    const hist = state.priceHistory[sym] || (state.priceHistory[sym] = []);
-    hist.push({ price: Number(t.lastPrice), ts: now, volume: Number(t.quoteVolume || 0) });
-    if (hist.length > PRICE_HISTORY_LIMIT) hist.splice(0, hist.length - PRICE_HISTORY_LIMIT);
+function buildClosedCandles(rows, now = Date.now()) {
+  const minutes = new Map();
+  for (const row of rows) {
+    const ts = Number(row[0]);
+    const price = Number(row[4]);
+    const volume = Number(row[7]); // quote asset volume (USDT)
+    if (!Number.isFinite(ts) || ts % 60000 !== 0 || !Number.isFinite(price) || price <= 0 ||
+        row[7] == null || !Number.isFinite(volume) || volume < 0 || ts + 60000 > now) continue;
+    minutes.set(ts, { price, volume });
+  }
+  const groups = new Map();
+  for (const [ts, candle] of minutes) {
+    const bucket = Math.floor(ts / CANDLE_MS) * CANDLE_MS;
+    if (!groups.has(bucket)) groups.set(bucket, []);
+    groups.get(bucket).push({ ts, ...candle });
+  }
+  const candles = [];
+  for (const [ts, group] of [...groups].sort((a, b) => a[0] - b[0])) {
+    group.sort((a, b) => a.ts - b.ts);
+    if (group.length !== 3 || group[0].ts !== ts || group[2].ts !== ts + 120000 || ts + CANDLE_MS > now) continue;
+    candles.push({ ts, price: group[2].price, volume: group.reduce((sum, c) => sum + c.volume, 0) });
+  }
+  const recent = candles.slice(-PRICE_HISTORY_LIMIT);
+  if (recent.length < PRICE_HISTORY_LIMIT || now - (recent.at(-1).ts + CANDLE_MS) >= CANDLE_MS ||
+      recent.some((c, i) => i > 0 && c.ts - recent[i - 1].ts !== CANDLE_MS)) {
+    throw new Error('완료된 연속 3분봉 데이터 부족 또는 지연');
+  }
+  return recent;
+}
+
+async function updatePriceHistory(state) {
+  const results = await Promise.allSettled(SYMBOLS.map(async (symbol) => {
+    const res = await fetch(`https://api.mexc.com/api/v3/klines?symbol=${symbol}&interval=1m&limit=65`, {
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) throw new Error(`캔들 조회 실패: ${res.status}`);
+    const rows = await res.json();
+    if (!Array.isArray(rows)) throw new Error('잘못된 캔들 응답');
+    return buildClosedCandles(rows);
+  }));
+  state.priceHistory = {};
+  results.forEach((result, i) => {
+    // 실패한 종목은 이전 지표를 재사용하지 않는다. 기존 포지션 손절은 시세로 계속 처리한다.
+    state.priceHistory[SYMBOLS[i]] = result.status === 'fulfilled' ? result.value : [];
   });
 }
 
@@ -89,7 +123,8 @@ function describeTrend(state, sym) {
   let dir = null;
   let streak = 0;
   for (let i = hist.length - 1; i > 0; i--) {
-    const curDir = hist[i].price >= hist[i - 1].price ? 'up' : 'down';
+    if (hist[i].price === hist[i - 1].price) break;
+    const curDir = hist[i].price > hist[i - 1].price ? 'up' : 'down';
     if (dir === null) { dir = curDir; streak = 1; continue; }
     if (curDir === dir) streak++;
     else break;
@@ -97,8 +132,8 @@ function describeTrend(state, sym) {
   const first = hist[0].price;
   const last = hist[hist.length - 1].price;
   const pct = first > 0 ? ((last - first) / first) * 100 : 0;
-  const dirLabel = dir === 'up' ? '상승' : '하락';
-  return `최근 ${hist.length}회 체크 중 ${dirLabel} ${streak}연속, 구간 수익률 ${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
+  const dirLabel = dir === null ? '보합' : dir === 'up' ? '상승' : '하락';
+  return `최근 ${hist.length}개 완료 3분봉 중 ${dirLabel} ${streak}연속, 구간 수익률 ${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
 }
 
 // recentTrend(연속 streak)만으로는 "가격만 보고" 판단하는 거라 횡보장
@@ -133,25 +168,17 @@ function describeRSI(state, sym) {
   return { value: rounded, label };
 }
 
-// 24시간 누적 거래대금(quoteVolume)의 체크 간 증가분을 "그 3분 동안의
-// 체결 대금"으로 근사하고, 최근 구간 평균과 비교해서 지금 움직임에
-// 거래량이 실제로 동반됐는지를 본다. 거래량 없는 가격 변동은 노이즈일
-// 가능성이 높다.
+// 최신 완료 3분봉의 거래대금을 이전 19개 완료 봉의 평균과 비교한다.
 function describeVolume(state, sym) {
   const hist = (state.priceHistory && state.priceHistory[sym]) || [];
-  if (hist.length < 4) return '거래량 데이터 부족';
-  const deltas = [];
-  for (let i = 1; i < hist.length; i++) {
-    const d = hist[i].volume - hist[i - 1].volume;
-    deltas.push(d > 0 ? d : 0);
-  }
-  const latest = deltas[deltas.length - 1];
-  const avg = deltas.reduce((s, v) => s + v, 0) / deltas.length;
+  if (hist.length < PRICE_HISTORY_LIMIT) return '거래량 데이터 부족';
+  const baseline = hist.slice(0, -1);
+  const avg = baseline.reduce((sum, c) => sum + c.volume, 0) / baseline.length;
   if (avg <= 0) return '거래량 데이터 부족';
-  const ratio = latest / avg;
-  if (ratio >= 1.5) return `거래량 급증 (평균 대비 ${ratio.toFixed(1)}배)`;
-  if (ratio <= 0.5) return `거래량 저조 (평균 대비 ${ratio.toFixed(1)}배)`;
-  return `거래량 평이 (평균 대비 ${ratio.toFixed(1)}배)`;
+  const ratio = hist.at(-1).volume / avg;
+  if (ratio >= 1.5) return `거래량 급증 (이전 완료 3분봉 평균 대비 ${ratio.toFixed(1)}배)`;
+  if (ratio <= 0.5) return `거래량 저조 (이전 완료 3분봉 평균 대비 ${ratio.toFixed(1)}배)`;
+  return `거래량 평이 (이전 완료 3분봉 평균 대비 ${ratio.toFixed(1)}배)`;
 }
 
 // 실제 모델 파인튜닝은 아니고, 트레이더별 "청산된 거래의 실현손익" 기록을
@@ -346,9 +373,7 @@ async function fetchTickers() {
     const d = bySymbol[sym];
     if (!d) return;
     // MEXC의 priceChangePercent는 소수(-0.0152 = -1.52%)라 100을 곱해 맞춘다.
-    // quoteVolume은 24시간 누적 거래대금(원화 아님, 코인 자체 기준) -- 매 체크마다
-    // 스냅샷을 남겨서 연속된 두 체크의 차이로 "그 구간에 실제로 거래된 대금"을
-    // 근사해 거래량 신호를 만든다.
+    // quoteVolume은 24시간 거래대금(USDT)이다. 거래량 신호는 별도 캔들 API로 계산한다.
     map[sym] = {
       lastPrice: Number(d.lastPrice),
       priceChangePercent: Number(d.priceChangePercent) * 100,
@@ -358,11 +383,8 @@ async function fetchTickers() {
   return map;
 }
 
-// LLM 호출 없이, 매 사이클 가격을 확인해서 보유 포지션의 평균매입가 대비
-// 손익률이 손절/익절 라인에 닿으면 즉시 전량 매도한다. 매수 시점에 걸어두는
-// OCO(손절+익절) 주문과 같은 역할 -- 포지션이 열려 있는 동안은 이 함수만
-// 관여하고, Claude에게는 더 이상 "청산할지" 묻지 않는다(비용 절감 +
-// 추세 안 꺾였는데 소폭 이익에 성급히 파는 문제를 구조적으로 차단).
+// AI 판단과 별도로 매 사이클 손절/익절/수익보호를 검사한다.
+// 재진입 대기나 초기 청산 제한은 이 자동 위험 관리에 적용하지 않는다.
 //
 // BREAKEVEN_*: 한 번이라도 수익이 ACTIVATE_PCT 이상 찍혔다가(peakPnlPct로 기억)
 // 다시 LOCK_PCT 수준까지 줄어들면 손절선(-2.5%)까지 가기 전에 선청산한다.
@@ -426,12 +448,36 @@ function checkStopLossAndTakeProfit(state, tickers) {
 // 증거금 비율에 상한을 둬서, 새 진입이 그 상한을 넘으면 증거금을
 // 줄이거나(여유분만큼) 아예 막는다.
 const MAX_TOTAL_EXPOSURE_PCT = 60;
+const REENTRY_COOLDOWN_MS = 9 * 60 * 1000;
+
+function validateDecision(decision) {
+  if (!['buy', 'short', 'sell', 'hold'].includes(decision.action) ||
+      (decision.action !== 'hold' && !SYMBOLS.includes(decision.symbol)) ||
+      !Number.isFinite(decision.amountKrw) || decision.amountKrw < 0 ||
+      typeof decision.reason !== 'string') throw new Error('잘못된 매매 판단');
+}
+
+function confirmedReversal(hist, side) {
+  if (!hist || hist.length < 3) return false;
+  const [a, b, c] = hist.slice(-3).map((h) => h.price);
+  const change = ((c - a) / a) * 100;
+  return side === 'short' ? b > a && c > b && change >= 0.1 : b < a && c < b && change <= -0.1;
+}
 
 function applyDecision(state, traderId, decision, tickers) {
+  validateDecision(decision);
   const p = state.portfolios[traderId];
   const trader = TRADERS.find((x) => x.id === traderId);
   const { action, symbol, amountKrw, reason } = decision;
   if ((action === 'buy' || action === 'short') && symbol && amountKrw > 0) {
+    const lastClose = [...(state.tradeHistory[traderId] || [])].reverse().find((entry) => entry.symbol === symbol);
+    if ((state.priceHistory[symbol] || []).length < PRICE_HISTORY_LIMIT ||
+        (lastClose && Date.now() - lastClose.ts < REENTRY_COOLDOWN_MS)) {
+      decision.action = 'hold';
+      decision.reason = `${reason} [캔들 데이터 부족 또는 청산 후 9분 재진입 대기]`;
+      state.tradeLog.push({ traderId, action: 'hold', symbol, reason: decision.reason, auto: !!decision.auto, ts: Date.now() });
+      return;
+    }
     const side = action === 'short' ? 'short' : 'long';
     const t = tickers[symbol];
     const prev = p.holdings[symbol];
@@ -470,6 +516,14 @@ function applyDecision(state, traderId, decision, tickers) {
     const prev = p.holdings[symbol];
     if (t && prev && prev.qty > 0) {
       const price = Number(t.lastPrice);
+      const currentPnlPct = ((price - prev.avgPrice) / prev.avgPrice) * 100 * (prev.side === 'short' ? -1 : 1);
+      if (prev.openedAt && Date.now() - prev.openedAt < REENTRY_COOLDOWN_MS &&
+          Math.abs(currentPnlPct) < 0.5 && !confirmedReversal(state.priceHistory[symbol], prev.side)) {
+        decision.action = 'hold';
+        decision.reason = `${reason} [진입 초기 미세 변동: 완료 3분봉 2개 이상의 반대 추세 확인 전 청산 보류]`;
+        state.tradeLog.push({ traderId, action: 'hold', symbol, reason: decision.reason, auto: !!decision.auto, ts: Date.now() });
+        return;
+      }
       const fraction = amountKrw ? Math.min(1, amountKrw / prev.margin) : 1;
       const sellQty = prev.qty * fraction;
       const releasedMargin = prev.margin * fraction;
@@ -477,7 +531,7 @@ function applyDecision(state, traderId, decision, tickers) {
       const priceChangePct = ((price - prev.avgPrice) / prev.avgPrice) * 100;
       const pnlPct = prev.side === 'short' ? -priceChangePct : priceChangePct;
       p.cash += Math.max(0, releasedMargin + pnl);
-      p.holdings[symbol] = { qty: prev.qty - sellQty, avgPrice: prev.avgPrice, margin: prev.margin - releasedMargin, side: prev.side };
+      p.holdings[symbol] = { ...prev, qty: prev.qty - sellQty, margin: prev.margin - releasedMargin };
       recordClosedTrade(state, traderId, { symbol, pnl, pnlPct, ts: Date.now() });
     }
   }
@@ -507,7 +561,7 @@ BTC/ETH/SOL/XRP/DOGE는 급락장에서 서로 같이 움직이는 경향이 커
 보류됨), 그 안에서 종목별 비중을 알아서 합리적으로 배분해라.
 
 market 데이터의 각 심볼에는 recentTrend/rsi/volumeSignal이 같이 온다.
-recentTrend는 "최근 N회 체크 중 하락 5연속, 구간 수익률 -2.3%" 같은 식으로
+recentTrend는 "최근 N개 완료 3분봉 중 하락 5연속, 구간 수익률 -2.3%" 같은 식으로
 방향성 확인용이고, rsi는 과매수(70 이상)/과매도(30 이하)/중립을 보여주고,
 volumeSignal은 그 가격 움직임에 거래량이 실제로 동반됐는지("거래량 급증"
 "거래량 저조")를 보여준다. 셋을 같이 봐라 -- recentTrend가 연속 3~4회 이상
@@ -516,6 +570,11 @@ volumeSignal은 그 가격 움직임에 거래량이 실제로 동반됐는지("
 과매도인데 추가로 숏 진입하는 건 피해라(되돌림 리스크). 매번 "아직 명확한
 추세가 아니다"라며 관망만 반복하지는 마라 -- 신호들이 같은 방향을 가리키면
 행동해도 된다.
+
+청산 후 같은 종목에 9분 동안 재진입하지 않는다. 진입 후 9분 안의 ±0.5% 미만
+미세 변동에서는 완료 3분봉 2개 연속 반대 방향, 합계 0.1% 이상 변화가 확인되어야
+수동 청산할 수 있다. 손절/익절/수익보호 자동 규칙은 이 제한과 무관하게 계속 적용된다.
+거래량 급증이나 RSI 과매도만으로 추세 반전이 확인됐다고 판단하지 마라.
 
 **이미 보유 중인 포지션을 너무 일찍 끊지 마라.** 너는 포지션이 있어도 3분마다
 계속 호출된다 -- 보유 중인 포지션이 추세 방향과 같은 방향으로 수익이 나고
@@ -565,8 +624,11 @@ ${JSON.stringify(portfolio.holdings)}
 [현재 시세]
 ${JSON.stringify(market)}
 
-[오늘 내 수익률]
-${myTodayPct >= 0 ? '+' : ''}${myTodayPct}%
+[오늘 수익률과 목표: 퍼센트 단위, 0.1은 0.1%이며 1%가 아니다]
+${JSON.stringify({ todayReturnPct: myTodayPct, targetReturnPct: TRADERS[0].dailyTargetPct,
+  targetReached: myTodayPct >= TRADERS[0].dailyTargetPct,
+  remainingPercentagePoints: Math.max(0, TRADERS[0].dailyTargetPct - myTodayPct) })}
+목표 달성 여부는 targetReached만 사용해라. 손실 만회나 목표를 채우기 위한 이유만으로 진입하지 마라.
 
 [최근 내 거래 성과 피드백]
 ${performanceSummary}
@@ -611,7 +673,7 @@ async function runTraderDecision(env, state, tickers, traderId, auto) {
   }
   const market = SYMBOLS.map((s) => {
     const t = tickers[s];
-    if (!t) return null;
+    if (!t || (state.priceHistory[s] || []).length < PRICE_HISTORY_LIMIT) return null;
     const rsi = describeRSI(state, s);
     return {
       symbol: s,
@@ -622,6 +684,7 @@ async function runTraderDecision(env, state, tickers, traderId, auto) {
       volumeSignal: describeVolume(state, s),
     };
   }).filter(Boolean);
+  if (!market.length) return { traderId, skipped: true, reason: 'candle_data_unavailable' };
   try {
     const decision = await callClaude(
       env,
@@ -726,7 +789,7 @@ export class TraderEngine {
     const state = await this.loadState();
     const tickers = await fetchTickers();
     state.tickers = tickers;
-    updatePriceHistory(state, tickers);
+    await updatePriceHistory(state);
     await rolloverDayIfNeeded(this.env, state, tickers);
     markGoalHitToday(state, tickers);
     checkStopLossAndTakeProfit(state, tickers);
@@ -772,7 +835,7 @@ export class TraderEngine {
       const state = await this.loadState();
       const tickers = await fetchTickers();
       state.tickers = tickers;
-      updatePriceHistory(state, tickers);
+      await updatePriceHistory(state);
       await rolloverDayIfNeeded(this.env, state, tickers);
       markGoalHitToday(state, tickers);
       checkStopLossAndTakeProfit(state, tickers);
